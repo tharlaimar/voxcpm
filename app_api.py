@@ -1,58 +1,119 @@
 import runpod
 import os
-import torch
 import requests
 import base64
-import torchaudio
-# အကယ်၍ ကိုကို့မော်ဒယ်အတွက် သီးသန့် library မလိုဘူးဆိုရင် ဒီ import တွေနဲ့တင် ရပါပြီ
-# အကယ်၍ ကိုကို့ Repo ထဲမှာ model.py ဆိုတဲ့ဖိုင်ရှိရင် "from model import VoxCPMModel" လို့ ပြင်ပါ
+import soundfile as sf
+from voxcpm import VoxCPM
 
-print("Loading Model from /runpod-volume/huggingface...")
-# မော်ဒယ်ကို Network Volume ကနေ Load လုပ်ခြင်း
-# ### EDIT HERE ###: ကိုကို့ မော်ဒယ် Loading Logic အမှန်ကို ဒီမှာထည့်ပါ
-# model = VoxCPMModel.from_pretrained("/runpod-volume/huggingface") 
+# ================================================================
+# Model ကို Global scope မှာ load လုပ်တယ်
+# Worker start တဲ့အချိန် တစ်ကြိမ်ပဲ run မယ် — request တိုင်း မဟုတ်ဘူး
+# ================================================================
+MODEL_PATH = "/runpod-volume/VoxCPM2"
 
-def encode_audio_to_base64(audio_path):
-    with open(audio_path, "rb") as audio_file:
-        return base64.b64encode(audio_file.read()).decode('utf-8')
+print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
+model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False)
+print("[INIT] Model loaded successfully!")
 
+
+# ================================================================
+# Helper functions
+# ================================================================
+def encode_audio_to_base64(audio_path: str) -> str:
+    with open(audio_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+def download_audio(url: str, dest_path: str) -> None:
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    with open(dest_path, "wb") as f:
+        f.write(response.content)
+
+
+# ================================================================
+# Main handler — RunPod က request တိုင်း ဒီ function ကို call မယ်
+#
+# Input format:
+#
+# Mode 1 — Voice Design (reference audio မလို):
+# {
+#   "input": {
+#     "action": "design",
+#     "text": "မင်္ဂလာပါ ကျွန်တော် VoxCPM ကို သုံးနေပါတယ်",
+#     "style": "A warm female voice, gentle and calm"   ← optional
+#   }
+# }
+#
+# Mode 2 — Voice Clone (reference audio URL လို):
+# {
+#   "input": {
+#     "action": "clone",
+#     "text": "မင်္ဂလာပါ ကျွန်တော် VoxCPM ကို သုံးနေပါတယ်",
+#     "audio_url": "https://example.com/reference_voice.wav"
+#   }
+# }
+#
+# Output:
+# {
+#   "status": "success",
+#   "audio_base64": "...",   ← base64 encoded WAV
+#   "sample_rate": 48000
+# }
+# ================================================================
 def handler(job):
-    job_input = job['input']
-    action = job_input.get("action")
-    text = job_input.get("text", "မင်္ဂလာပါ")
+    job_input   = job["input"]
+    action      = job_input.get("action", "design")
+    text        = job_input.get("text", "Hello from VoxCPM2!")
     output_path = "/tmp/output.wav"
 
     try:
-        # --- Mode 1: Preset Voice ---
-        if action == "preset":
-            voice_id = job_input.get("voice_id", "default")
-            # ### EDIT HERE ###: model.generate(text, speaker_id=voice_id, output=output_path)
-            # အပေါ်ကလိုမျိုး ကိုကို့ မော်ဒယ်မှာ သုံးတဲ့ Function နာမည်ကို ထည့်ပါ
-            
-        # --- Mode 2: Voice Cloning ---
+        # ── Mode 1: Voice Design ──────────────────────────────────
+        if action == "design":
+            style     = job_input.get("style", "")
+            full_text = f"({style}){text}" if style else text
+
+            wav = model.generate(
+                text=full_text,
+                cfg_value=2.0,
+                inference_timesteps=10,
+            )
+            sf.write(output_path, wav, model.tts_model.sample_rate)
+
+        # ── Mode 2: Voice Clone ───────────────────────────────────
         elif action == "clone":
             audio_url = job_input.get("audio_url")
-            temp_ref = "/tmp/reference.wav"
-            response = requests.get(audio_url)
-            with open(temp_ref, 'wb') as f: f.write(response.content)
-            # ### EDIT HERE ###: model.clone(text, reference_audio=temp_ref, output=output_path)
+            if not audio_url:
+                return {"status": "error", "message": "audio_url is required for clone action"}
 
-        # --- Mode 3: Prompt/Emotion ---
-        elif action == "prompt":
-            style = job_input.get("style", "neutral")
-            # ### EDIT HERE ###: model.generate(text, style=style, output=output_path)
+            ref_path = "/tmp/reference.wav"
+            download_audio(audio_url, ref_path)
+
+            wav = model.generate(
+                text=text,
+                reference_wav_path=ref_path,
+                cfg_value=2.0,
+                inference_timesteps=10,
+            )
+            sf.write(output_path, wav, model.tts_model.sample_rate)
 
         else:
-            return {"status": "error", "message": "Invalid action"}
+            return {"status": "error", "message": f"Unknown action '{action}'. Use 'design' or 'clone'."}
 
-        # ရလဒ်ပြန်ပို့ခြင်း
+        # ── Response ──────────────────────────────────────────────
         if os.path.exists(output_path):
-            return {"status": "success", "audio_base64": encode_audio_to_base64(output_path)}
+            return {
+                "status":       "success",
+                "audio_base64": encode_audio_to_base64(output_path),
+                "sample_rate":  model.tts_model.sample_rate,
+            }
         else:
-            return {"status": "error", "message": "Audio generation failed"}
+            return {"status": "error", "message": "Audio file was not created"}
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
+# ================================================================
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
