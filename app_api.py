@@ -1,22 +1,21 @@
 import runpod
 import os
-import torch
 import base64
 import torchaudio
-from voxcpm import VoxCPMModel # VoxCPM library မှ တိုက်ရိုက်ခေါ်ခြင်း
+from voxcpm import VoxCPMModel
 
-# 1. ပတ်ဝန်းကျင်သတ်မှတ်ချက်
-MODEL_PATH = "/runpod-volume/huggingface" # Network Volume ထဲက Model လမ်းကြောင်း
+# ၁။ Model Load လုပ်ခြင်း
+print("Initializing Model...")
+# Model Path ကို ကိုကို့ရဲ့ Network Volume လမ်းကြောင်းအတိုင်းထားပါ
+model = VoxCPMModel.from_pretrained("/runpod-volume/huggingface", device="cuda")
+print("Model Ready!")
 
-print("Loading VoxCPM Model...")
-# Model ကို အစကတည်းက Load လုပ်ထားခြင်း
-model = VoxCPMModel.from_pretrained(MODEL_PATH, device="cuda")
-print("Model Loaded Successfully!")
-
+# Base64 ပြောင်းပေးသည့် Function
 def encode_audio_to_base64(audio_path):
     with open(audio_path, "rb") as audio_file:
         return base64.b64encode(audio_file.read()).decode('utf-8')
 
+# ၂။ Handler Function (Request ဝင်လာတိုင်း အလုပ်လုပ်မည့်နေရာ)
 def handler(job):
     job_input = job['input']
     action = job_input.get("action")
@@ -24,41 +23,32 @@ def handler(job):
     output_path = "/tmp/output.wav"
 
     try:
-        # --- Mode 1: Preset Voice (အသင့်သုံးအသံ) ---
+        # Mode 1: Preset Voice
         if action == "preset":
             voice_id = job_input.get("voice_id", "default_speaker")
-            # VoxCPM Preset Generation
             wav = model.generate(text=text, speaker_id=voice_id)
             torchaudio.save(output_path, wav.cpu(), 24000)
 
-        # --- Mode 2: Voice Cloning (အသံကလုန်းခြင်း) ---
+        # Mode 2: Voice Cloning
         elif action == "clone":
-            # ကိုကို့ရဲ့ Clone Logic အရ reference_audio လိုအပ်ပါတယ်
-            ref_audio = job_input.get("ref_audio_path", "/runpod-volume/voices/ref.wav")
+            ref_audio = job_input.get("ref_audio_path")
             wav = model.clone(text=text, reference_audio=ref_audio)
             torchaudio.save(output_path, wav.cpu(), 24000)
 
-        # --- Mode 3: Prompt/Style (Emotion ထည့်ထုတ်ခြင်း) ---
+        # Mode 3: Prompt/Style
         elif action == "prompt":
             style = job_input.get("style", "neutral")
             wav = model.generate(text=text, style_prompt=style)
             torchaudio.save(output_path, wav.cpu(), 24000)
 
         else:
-            return {"status": "error", "message": "Invalid action parameter"}
+            return {"status": "error", "message": "Invalid action"}
 
-        # ရလဒ်ပြန်ပို့ခြင်း
-        if os.path.exists(output_path):
-            return {
-                "status": "success",
-                "audio_base64": encode_audio_to_base64(output_path)
-            }
-        else:
-            return {"status": "error", "message": "Audio generation failed"}
+        return {"status": "success", "audio_base64": encode_audio_to_base64(output_path)}
 
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# RunPod Serverless စတင်ခြင်း
+# ၃။ RunPod ကို ခေါ်ခြင်း (ဒီစာကြောင်းက အရေးကြီးဆုံးပါ)
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
