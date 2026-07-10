@@ -1,0 +1,8 @@
+runpod
+torch>=2.5.0
+torchaudio>=2.5.0
+transformers>=4.36.2
+soundfile
+numpy
+safetensors
+einops
