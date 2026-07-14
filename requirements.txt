@@ -1,6 +1,6 @@
 runpod
-torch>=2.5.0
-torchaudio>=2.5.0
+torch>=2.3.1
+torchaudio>=2.3.1
 transformers>=4.36.2
 soundfile
 numpy
