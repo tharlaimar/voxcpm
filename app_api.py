@@ -5,6 +5,14 @@ import requests
 import base64
 import numpy as np
 import soundfile as sf
+import sys
+import torch
+
+# 🌟 [FAIL-FAST SYSTEM] Driver အဟောင်းကြောင့်ဖြစ်စေ၊ GPU မမိလို့ဖြစ်စေ CPU ပေါ်ရောက်သွားရင် တန်းကစ်မယ်
+if not torch.cuda.is_available():
+    print("[CRITICAL] CUDA/GPU မမိပါ! (Driver အဟောင်းဖြစ်နေနိုင်သည်)")
+    print("[CRITICAL] Worker ကို ချက်ချင်း ပိတ်ချပြီး Job ကို Failed အဖြစ် သတ်မှတ်ပါမည်။")
+    sys.exit(1)
 from voxcpm import VoxCPM
 
 # ================================================================
