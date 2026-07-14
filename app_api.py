@@ -175,7 +175,7 @@ def handler(job):
 
             wav = generate_chunked(
                 text,
-                reference_wav_path=ref_path,
+                prompt_wav_path=ref_path,
                 **gen_kwargs,
             )
             sf.write(out_path, wav, SAMPLE_RATE)
@@ -195,7 +195,7 @@ def handler(job):
                 # Ultimate cloning — timbre + prosody + nuance အကုန် ကူးတယ်
                 wav = generate_chunked(
                     text,
-                    reference_wav_path=ref_path,
+                    
                     prompt_wav_path=ref_path,
                     prompt_text=reference_text,
                     **gen_kwargs,
@@ -204,7 +204,7 @@ def handler(job):
                 # Controllable cloning — timbre ပဲ ကူးတယ်
                 wav = generate_chunked(
                     text,
-                    reference_wav_path=ref_path,
+                    prompt_wav_path=ref_path,
                     **gen_kwargs,
                 )
             sf.write(out_path, wav, SAMPLE_RATE)
