@@ -13,13 +13,13 @@ if not torch.cuda.is_available():
     print("[CRITICAL] CUDA/GPU မမိပါ! (Driver အဟောင်းဖြစ်နေနိုင်သည်)")
     print("[CRITICAL] Worker ကို ချက်ချင်း ပိတ်ချပြီး Job ကို Failed အဖြစ် သတ်မှတ်ပါမည်။")
     sys.exit(1)
+
 from voxcpm import VoxCPM
 
 # ================================================================
 # Model Global Load — worker start တဲ့အချိန် တစ်ကြိမ်ပဲ run မယ်
 # ================================================================
 MODEL_PATH  = "/runpod-volume/VoxCPM2"
-SAMPLE_RATE = 48000   # VoxCPM2 native output
 MAX_CHARS   = 150     # chunk တစ်ခုရဲ့ max character (RAM safe)
 
 print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
@@ -28,27 +28,25 @@ print("[INIT] Model loaded successfully!")
 
 
 # ================================================================
-# မြန်မာစာ Chunking
+# Text Chunking (မြန်မာ/အင်္ဂလိပ်)
 # ================================================================
 def split_myanmar_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
     """
-    မြန်မာစာကို ။ နဲ့ ၊ နဲ့ ဖြတ်ပြီး chunk တွေ ခွဲတယ်။
+    မြန်မာစာကို (။၊) နဲ့ အင်္ဂလိပ်စာကို (.,) နဲ့ ဖြတ်ပြီး chunk တွေ ခွဲတယ်။
     chunk တစ်ခု max_chars ထက် မကျော်ဘဲ တတ်နိုင်သမျှ ပေါင်းသိမ်းတယ်။
     """
-    # ။ နဲ့ ၊ မှာ ဖြတ်တယ် — delimiter ကို sentence နောက်မှာ ထားတယ်
-    sentences = re.split(r'(?<=[။၊])', text)
+    # 💡 အင်္ဂလိပ်စာလုံးတွေ အလယ်ကနေ အတင်းမဖြတ်မိအောင် Full stop (.) နဲ့ Comma (,) ပါ ထည့်ထားပါတယ်
+    sentences = re.split(r'(?<=[။၊.,])', text)
     sentences = [s.strip() for s in sentences if s.strip()]
 
     chunks = []
     current = ""
 
     for sentence in sentences:
-        # sentence တစ်ခုထဲကိုယ်တိုင် max_chars ထက် ကျော်နေရင် hard split လုပ်
         if len(sentence) > max_chars:
             if current:
                 chunks.append(current.strip())
                 current = ""
-            # space နဲ့ hard split
             for i in range(0, len(sentence), max_chars):
                 chunks.append(sentence[i:i+max_chars].strip())
             continue
@@ -66,30 +64,51 @@ def split_myanmar_text(text: str, max_chars: int = MAX_CHARS) -> list[str]:
     return [c for c in chunks if c]
 
 
-def generate_chunked(text: str, **kwargs) -> np.ndarray:
+# ================================================================
+# Generation System
+# ================================================================
+def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     """
     Long text ကို chunk တွေ ခွဲပြီး generate လုပ်ပြီး concatenate လုပ်တယ်။
-    RAM overflow မဖြစ်အောင် တစ်ခုပြီး တစ်ခု generate လုပ်တယ်။
     """
     chunks = split_myanmar_text(text)
     print(f"[CHUNK] Split into {len(chunks)} chunks: {[len(c) for c in chunks]} chars")
 
+    # 💡 Model ရဲ့ အမှန်တကယ် Sample Rate ကို အလိုအလျောက် ယူပါမည် (အသံမကွဲအောင်ပါ)
+    actual_sr = model.tts_model.sample_rate
+    silence_len = int(actual_sr * 0.15)
+    silence = np.zeros(silence_len, dtype=np.float32)
+
     audio_parts = []
+    
     for i, chunk in enumerate(chunks):
+        if len(chunk.strip()) < 2:
+            continue
+            
         print(f"[CHUNK] Generating chunk {i+1}/{len(chunks)}: {chunk[:40]}...")
-        wav = model.generate(text=chunk, **kwargs)
-        audio_parts.append(wav)
 
-    if len(audio_parts) == 1:
-        return audio_parts[0]
+        # 💡 Inference mode သုံးပြီး Memory ရှင်းအောင် တွက်ချက်ပါမည် (Noise လျှော့ချရန်)
+        with torch.inference_mode():
+            safe_text = chunk + " "
+            wav = model.generate(text=safe_text, **kwargs)
+            
+            # 1D Array အတိအကျဖြစ်အောင် ဖြန့်ပေးပါမည်
+            if isinstance(wav, torch.Tensor):
+                wav = wav.detach().cpu().numpy()
+            wav = np.array(wav).astype(np.float32).flatten()
+            
+            audio_parts.append(wav)
+            if i < len(chunks) - 1:
+                audio_parts.append(silence)
+                
+        # 💡 GPU Memory ရှင်းထုတ်ခြင်း
+        torch.cuda.empty_cache()
 
-    # chunk တွေ ကြား short silence (0.2s) ထည့်ပြီး join လုပ်တယ်
-    silence = np.zeros(int(SAMPLE_RATE * 0.2), dtype=np.float32)
-    combined = audio_parts[0]
-    for part in audio_parts[1:]:
-        combined = np.concatenate([combined, silence, part])
+    if not audio_parts:
+        return np.zeros(100, dtype=np.float32), actual_sr
 
-    return combined
+    combined = np.concatenate(audio_parts)
+    return combined, actual_sr
 
 
 # ================================================================
@@ -109,47 +128,6 @@ def download_file(url: str, dest: str) -> None:
 
 # ================================================================
 # Handler
-#
-# ── Mode 1: style ──────────────────────────────────────────────
-#   Prompt နဲ့ voice style ပြောင်းတာ — reference audio မလို
-#
-#   {
-#     "input": {
-#       "action": "style",
-#       "text":   "မင်္ဂလာပါ။ ကျွန်တော် VoxCPM ကို သုံးနေပါတယ်။",
-#       "style":  "A warm female voice, gentle and calm"   ← optional
-#     }
-#   }
-#
-# ── Mode 2: preset ─────────────────────────────────────────────
-#   Frontend မှာ သိမ်းထားတဲ့ နမူနာ audio URL ကို reference သုံးတာ
-#
-#   {
-#     "input": {
-#       "action":    "preset",
-#       "text":      "မင်္ဂလာပါ။ ကျွန်တော် VoxCPM ကို သုံးနေပါတယ်။",
-#       "audio_url": "https://your-cdn.com/voices/sample1.wav"
-#     }
-#   }
-#
-# ── Mode 3: clone ──────────────────────────────────────────────
-#   User upload လုပ်တဲ့ audio + reference text နဲ့ အသံ clone လုပ်တာ
-#
-#   {
-#     "input": {
-#       "action":         "clone",
-#       "text":           "ထုတ်ချင်တဲ့ စာသား",
-#       "audio_url":      "https://your-storage.com/user-upload.wav",
-#       "reference_text": "reference audio ထဲက စာသား"   ← optional
-#     }
-#   }
-#
-# ── Output (သုံးမျိုးလုံး) ────────────────────────────────────
-#   {
-#     "status":       "success",
-#     "audio_base64": "...",
-#     "sample_rate":  48000
-#   }
 # ================================================================
 def handler(job):
     job_input = job["input"]
@@ -169,8 +147,8 @@ def handler(job):
             style     = job_input.get("style", "")
             full_text = f"({style}){text}" if style else text
 
-            wav = generate_chunked(full_text, **gen_kwargs)
-            sf.write(out_path, wav, SAMPLE_RATE)
+            wav, actual_sr = generate_chunked(full_text, **gen_kwargs)
+            sf.write(out_path, wav, actual_sr)
 
         # ── Mode 2: Preset ────────────────────────────────────────
         elif action == "preset":
@@ -181,12 +159,12 @@ def handler(job):
             ref_path = "/tmp/preset_ref.wav"
             download_file(audio_url, ref_path)
 
-            wav = generate_chunked(
+            # 💡 prompt_text မရှိလျှင် prompt_wav_path မထည့်ပါ (library error ရှောင်ရန်)
+            wav, actual_sr = generate_chunked(
                 text,
-                
                 **gen_kwargs,
             )
-            sf.write(out_path, wav, SAMPLE_RATE)
+            sf.write(out_path, wav, actual_sr)
 
         # ── Mode 3: Clone ─────────────────────────────────────────
         elif action == "clone":
@@ -200,22 +178,20 @@ def handler(job):
             download_file(audio_url, ref_path)
 
             if reference_text:
-                # Ultimate cloning — timbre + prosody + nuance အကုန် ကူးတယ်
-                wav = generate_chunked(
+                # 💡 နှစ်ခုလုံးရှိလျှင် တွဲထည့်ပါမည်
+                wav, actual_sr = generate_chunked(
                     text,
-                    
                     prompt_wav_path=ref_path,
                     prompt_text=reference_text,
                     **gen_kwargs,
                 )
             else:
-                # Controllable cloning — timbre ပဲ ကူးတယ်
-                wav = generate_chunked(
+                # 💡 prompt_text မရှိလျှင် ဘာမှမထည့်ပါ
+                wav, actual_sr = generate_chunked(
                     text,
-                    
                     **gen_kwargs,
                 )
-            sf.write(out_path, wav, SAMPLE_RATE)
+            sf.write(out_path, wav, actual_sr)
 
         else:
             return {
@@ -228,7 +204,7 @@ def handler(job):
             return {
                 "status":       "success",
                 "audio_base64": encode_audio(out_path),
-                "sample_rate":  SAMPLE_RATE,
+                "sample_rate":  actual_sr, # 💡 မှန်ကန်သော sample rate ကို ပြန်ပို့ပါမည်
             }
         else:
             return {"status": "error", "message": "Audio file was not created"}
