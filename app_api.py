@@ -5,28 +5,50 @@ import requests
 import base64
 import numpy as np
 import soundfile as sf
-import sys
 import torch
-
-# 🌟 [FAIL-FAST SYSTEM] Driver အဟောင်းကြောင့်ဖြစ်စေ၊ GPU မမိလို့ဖြစ်စေ CPU ပေါ်ရောက်သွားရင် တန်းကစ်မယ်
-if not torch.cuda.is_available():
-    print("[CRITICAL] CUDA/GPU မမိပါ! (Driver အဟောင်းဖြစ်နေနိုင်သည်)")
-    print("[CRITICAL] Worker ကို ချက်ချင်း ပိတ်ချပြီး Job ကို Failed အဖြစ် သတ်မှတ်ပါမည်။")
-    sys.exit(1)
-
 from voxcpm import VoxCPM
 
-# ================================================================
-# Model Global Load — worker start တဲ့အချိန် တစ်ကြိမ်ပဲ run မယ်
-# ================================================================
+# GPU ရဲ့ Tensor Core များကို အပြည့်အဝ အသုံးပြုရန် (Speed Up)
+torch.set_float32_matmul_precision('high')
+
+# 🌟 [FAIL-FAST SYSTEM အဆင့်မြှင့်တင်ခြင်း]
+# sys.exit(1) ဖြင့် အတင်းမပိတ်ဘဲ၊ Flutter ဆီ ချက်ချင်း Error ပို့ရန် Flag မှတ်ထားပါမည်
+gpu_is_bad = not torch.cuda.is_available()
+model = None
 MODEL_PATH  = "/runpod-volume/VoxCPM2"
-MAX_CHARS   = 150     # chunk တစ်ခုရဲ့ max character (RAM safe)
+MAX_CHARS   = 150
 
-print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
-model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False)
-print("[INIT] Model loaded successfully!")
+if gpu_is_bad:
+    print("[CRITICAL] CUDA/GPU မမိပါ! (Driver အဟောင်းဖြစ်နေနိုင်သည်)")
+    print("[CRITICAL] Worker သည် ဝင်လာသမျှ Job များကို ချက်ချင်း Error ပြန်ပို့ပါမည်။")
+else:
+    # GPU ကောင်းမှသာ Model ကို Load လုပ်ပါမည် (CPU ပေါ် Load မိပြီး Freeze ဖြစ်ခြင်းမှ ကာကွယ်ရန်)
+    print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
+    model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False)
+    print("[INIT] Model loaded successfully!")
 
+# ================================================================
+# Text Chunking နှင့် Generate Function များကို (အရင်အတိုင်း ဆက်ထားပါ)
+# ================================================================
+# def split_myanmar_text(...):
+# def generate_chunked(...):
+# def encode_audio(...):
+# def download_file(...):
 
+# ================================================================
+# Handler
+# ================================================================
+def handler(job):
+    # 🚀 ဝင်လာတာနဲ့ GPU မကောင်းရင် Flutter ဆီ ချက်ချင်း Error ပြန်ကန်ထုတ်မည်
+    if gpu_is_bad:
+        return {"status": "error", "message": "WORKER_CRASHED"}
+
+    job_input = job["input"]
+    action    = job_input.get("action", "style")
+    text      = job_input.get("text", "မင်္ဂလာပါ။")
+    out_path  = "/tmp/output.wav"
+
+    # ... (ကျန်တဲ့ ကုဒ်တွေ အကုန် အရင်အတိုင်းပါပဲ ကိုကို) ...
 # ================================================================
 # Text Chunking (မြန်မာ/အင်္ဂလိပ်)
 # ================================================================
@@ -174,6 +196,8 @@ def handler(job):
             # 💡 prompt_text မရှိလျှင် prompt_wav_path မထည့်ပါ (library error ရှောင်ရန်)
             wav, actual_sr = generate_chunked(
                 text,
+                prompt_wav_path=ref_path,
+                    prompt_text="ဒီနေ့ ပြောပြမယ့် အမှုကတော့၊ တကယ်ကို ထူးခြားဆန်းကြယ်ပြီး အဖြေရှာမရသေးတဲ့ အမှုတစ်ခုပဲ ဖြစ်ပါတယ်။",
                 **gen_kwargs,
             )
             sf.write(out_path, wav, actual_sr)
