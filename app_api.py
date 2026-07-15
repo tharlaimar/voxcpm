@@ -212,7 +212,7 @@ def handler(job):
                 # Controllable cloning — timbre ပဲ ကူးတယ်
                 wav = generate_chunked(
                     text,
-                    prompt_wav_path=ref_path,
+                    
                     **gen_kwargs,
                 )
             sf.write(out_path, wav, SAMPLE_RATE)
