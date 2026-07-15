@@ -1,17 +1,17 @@
 import os
 import gc
 import re
+import time
 import requests
 import base64
+import traceback
 import numpy as np
 import soundfile as sf
 import torch
 import torchaudio
 torchaudio.set_audio_backend("soundfile")
 
-# FastAPI for Local RunPod Mocking
-from fastapi import FastAPI, Request, BackgroundTasks
-import uvicorn
+import runpod
 from voxcpm import VoxCPM
 
 # 🛑 PyTorch Compile ပိတ်ခြင်း (Error ကာကွယ်ရန်)
@@ -21,10 +21,10 @@ torch._dynamo.config.disable = True
 # 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း (ကိုကို့ Local လမ်းကြောင်းများ)
 BASE_DIR = "/runpod-volume/VoxCPM2"
 MODEL_DIR = os.path.join(BASE_DIR, "VoxCPM", "models")
-OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
+OUTPUT_DIR = "/tmp"  # RunPod မှာ ယာယီဖိုင်တွေကို /tmp မှာ ထားတာ အကောင်းဆုံးပါ
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင် (အရင် app.py က အသံဖိုင်)
+# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
 GIRL_VOICE = os.path.join(BASE_DIR, "girl_voice.wav")
 GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
 
@@ -34,34 +34,34 @@ if torch.cuda.is_available():
     print("🚀 NVIDIA GPU ဖြင့် အလုပ်လုပ်ပါမည်။")
 
 print(f"⏳ Loading Model from {MODEL_DIR} ...")
-model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
-print("✅ Model loaded successfully!")
+try:
+    model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
+    print("✅ Model loaded successfully!")
+except Exception as e:
+    print(f"❌ Model Loading Failed: {e}")
+    model = None
 
 # ================================================================
-# စာကြောင်းပိုင်းသည့်စနစ် (app.py အတိုင်း အတိအကျ သုံးထားသည်)
+# စာကြောင်းပိုင်းသည့်စနစ်
 # ================================================================
 def split_myanmar_text(text: str) -> list[str]:
-    # ကွင်းစကွင်းပိတ်များကို ဖယ်ရှားမည်
     clean_text = re.sub(r'\[.*?\]', '', text)
     clean_text = re.sub(r'\(.*?\)', '', clean_text)
-    # စာကြောင်းများကို ပိုင်းဖြတ်မည်
     smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
     target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
     return target_texts
 
 # ================================================================
-# AI Generation Core (app.py အတိုင်း မူလအရည်အသွေးဖြင့် ထုတ်မည်)
+# AI Generation Core 
 # ================================================================
 def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     chunks = split_myanmar_text(text)
     
-    # 💡 24000 အသေမထားဘဲ Model ၏ အမှန်တကယ် Sample Rate ကို ယူမည် (အသံမအောစေရန်)
     actual_sr = model.tts_model.sample_rate 
     silence_len = int(actual_sr * 0.5) 
     silence = np.zeros(silence_len, dtype=np.float32)
     audio_parts = []
     
-    # 💡 app.py ကအတိုင်း အသေတ်မှတ်ချက်များ ထည့်မည် (၅၃၂ ခါ တွက်ခြင်းမှ ကာကွယ်ရန်)
     kwargs['cfg_value'] = 2.1
     kwargs['inference_timesteps'] = 15
 
@@ -70,20 +70,25 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
         
         with torch.inference_mode():
             safe_text = chunk + " "
-            wav_chunk = model.generate(text=safe_text, **kwargs)
-            
-            if isinstance(wav_chunk, tuple):
-                wav_chunk = wav_chunk[0]
-            if isinstance(wav_chunk, torch.Tensor):
-                wav_chunk = wav_chunk.detach().cpu().numpy()
+            try:
+                wav_chunk = model.generate(text=safe_text, **kwargs)
                 
-            # 💡 float32 အဖြစ်သာ ထားမည် (အသံ မပီမသဖြစ်ခြင်းမှ ကာကွယ်ရန်)
-            wav_chunk = wav_chunk.astype(np.float32).flatten()
-            audio_parts.append(wav_chunk)
-            
-            if i < len(chunks) - 1:
-                audio_parts.append(silence)
+                if isinstance(wav_chunk, tuple):
+                    wav_chunk = wav_chunk[0]
+                if isinstance(wav_chunk, torch.Tensor):
+                    wav_chunk = wav_chunk.detach().cpu().numpy()
+                    
+                wav_chunk = wav_chunk.astype(np.float32).flatten()
+                audio_parts.append(wav_chunk)
+                
+                if i < len(chunks) - 1:
+                    audio_parts.append(silence)
+            except Exception as e:
+                print(f"⚠️ Error generating chunk '{chunk}': {e}")
+                # တစ်ပိုင်း Error တက်ရင်တောင် အကုန်မသေအောင် ကျော်သွားမယ်
+                continue 
         
+        # OOM မဖြစ်အောင် Memory ရှင်းထုတ်ခြင်း
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -94,21 +99,42 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     final_wav = np.concatenate(audio_parts)
     return final_wav, actual_sr
 
-def download_file(url: str, dest: str) -> None:
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        f.write(r.content)
+# ================================================================
+# 💡 အသံဖိုင် Download ဆွဲရာတွင် (၃) ကြိမ်အထိ Retry လုပ်ပေးမည့် စနစ်
+# ================================================================
+def download_file(url: str, dest: str, max_retries: int = 3) -> None:
+    for attempt in range(max_retries):
+        try:
+            print(f"📥 Downloading audio (Attempt {attempt + 1}/{max_retries})...")
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                f.write(r.content)
+            print("✅ Download successful!")
+            return
+        except Exception as e:
+            print(f"⚠️ Download failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2) # ၂ စက္ကန့်နားပြီးမှ ပြန်စမ်းမည်
+            else:
+                raise Exception(f"Failed to download audio after {max_retries} attempts. {e}")
 
 # ================================================================
-# API Handler Logic
+# API Handler Logic (RunPod)
 # ================================================================
-def handler(job_input):
+def handler(job):
+    # Model ကြီး တက်မလာဘဲ Error တက်နေရင် ချက်ချင်း ပြန်ပို့ပေးမည်
+    if model is None:
+        return {"status": "error", "message": "WORKER_CRASHED: AI Model failed to load."}
+
+    job_input = job.get("input", {})
     action    = job_input.get("action", "style")
     text      = job_input.get("text", "မင်္ဂလာပါ။")
     
-    out_path  = os.path.join(OUTPUT_DIR, "output.wav")
-    raw_ref   = os.path.join(OUTPUT_DIR, "raw_ref.wav")
+    # 💡 ထပ်နေတဲ့ဖိုင်တွေ မဖြစ်အောင် Job ID လေးခံပြီး ယာယီနာမည်ပေးမည်
+    job_id = job.get("id", "temp")
+    out_path  = os.path.join(OUTPUT_DIR, f"output_{job_id}.wav")
+    raw_ref   = os.path.join(OUTPUT_DIR, f"raw_ref_{job_id}.wav")
 
     gen_kwargs = {}
 
@@ -117,7 +143,6 @@ def handler(job_input):
             style = job_input.get("style", "")
             full_text = f"({style}){text}" if style else text
             
-            # Style အတွက် Default Reference ကို app.py အတိုင်းထားမည်
             gen_kwargs["prompt_wav_path"] = GIRL_VOICE
             gen_kwargs["prompt_text"] = GIRL_PROMPT
             
@@ -130,9 +155,9 @@ def handler(job_input):
             if not audio_url:
                 raise Exception("audio_url is required")
 
+            # 💡 (၃) ကြိမ် Retry ပါသော Download စနစ်ကို သုံးမည်
             download_file(audio_url, raw_ref)
             
-            # Preprocess များကို ဖြုတ်ပြီး app.py အတိုင်း တိုက်ရိုက်သုံးမည်
             gen_kwargs["prompt_wav_path"] = raw_ref
             if reference_text: 
                 gen_kwargs["prompt_text"] = reference_text
@@ -143,41 +168,24 @@ def handler(job_input):
         with open(out_path, "rb") as f:
             audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-        return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# ================================================================
-# FastAPI Server (Mocking RunPod)
-# ================================================================
-app = FastAPI()
-jobs_db = {} # Job Status မှတ်သားရန်
-
-@app.post("/run")
-async def run_endpoint(background_tasks: BackgroundTasks, request: Request):
-    data = await request.json()
-    job_input = data.get("input", {})
-    
-    # Random Job ID ဖန်တီးမည်
-    import uuid
-    job_id = str(uuid.uuid4())
-    jobs_db[job_id] = {"status": "IN_PROGRESS"}
-    
-    # Background တွင် AI ကို အလုပ်လုပ်ခိုင်းမည်
-    def run_ai_task():
+        # 💡 ယာယီဖိုင်များကို ချက်ချင်း ပြန်ဖျက်မည် (Storage မပြည့်အောင်)
         try:
-            result = handler(job_input)
-            jobs_db[job_id] = {"status": "COMPLETED", "output": result}
-        except Exception as e:
-            jobs_db[job_id] = {"status": "FAILED", "error": str(e)}
-            
-    background_tasks.add_task(run_ai_task)
-    return {"id": job_id, "status": "IN_QUEUE"}
+            if os.path.exists(out_path): os.remove(out_path)
+            if os.path.exists(raw_ref): os.remove(raw_ref)
+        except:
+            pass
 
-@app.get("/status/{job_id}")
-async def status_endpoint(job_id: str):
-    return jobs_db.get(job_id, {"status": "FAILED", "error": "Job not found"})
+        return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
+        
+    except Exception as e:
+        # Worker Crash မဖြစ်အောင် Traceback နဲ့ ဖမ်းထားပြီး Error အတိအကျကို ပြန်ပို့ပေးမည်
+        err_msg = traceback.format_exc()
+        print(f"❌ ERROR: {err_msg}")
+        return {"status": "error", "message": str(e), "traceback": err_msg}
 
+# ================================================================
+# RunPod Serverless Entry Point
+# ================================================================
 if __name__ == "__main__":
-    print("🌟 Local API Server စတင်နေပါပြီ... (http://0.0.0.0:8000)")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("🌟 RunPod Serverless စတင်နေပါပြီ...")
+    runpod.serverless.start({"handler": handler})
