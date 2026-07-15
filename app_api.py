@@ -74,8 +74,12 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     chunks = split_myanmar_text(text)
     print(f"[CHUNK] Split into {len(chunks)} chunks: {[len(c) for c in chunks]} chars")
 
-    # 💡 Model ရဲ့ အမှန်တကယ် Sample Rate ကို အလိုအလျောက် ယူပါမည် (အသံမကွဲအောင်ပါ)
-    actual_sr = model.tts_model.sample_rate
+    # 💡 VoxCPM ရဲ့ မှန်ကန်တဲ့ Sample Rate ကို ယူပါမယ်
+    try:
+        actual_sr = int(model.tts_model.sample_rate)
+    except:
+        actual_sr = 24000 # အရန်အနေနဲ့ ၂၄၀၀၀ ထားပါမယ်
+        
     silence_len = int(actual_sr * 0.15)
     silence = np.zeros(silence_len, dtype=np.float32)
 
@@ -85,14 +89,12 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
         if len(chunk.strip()) < 2:
             continue
             
-        print(f"[CHUNK] Generating chunk {i+1}/{len(chunks)}: {chunk[:40]}...")
+        print(f"[CHUNK] Generating chunk {i+1}/{len(chunks)}...")
 
-        # 💡 Inference mode သုံးပြီး Memory ရှင်းအောင် တွက်ချက်ပါမည် (Noise လျှော့ချရန်)
         with torch.inference_mode():
             safe_text = chunk + " "
             wav = model.generate(text=safe_text, **kwargs)
             
-            # 1D Array အတိအကျဖြစ်အောင် ဖြန့်ပေးပါမည်
             if isinstance(wav, torch.Tensor):
                 wav = wav.detach().cpu().numpy()
             wav = np.array(wav).astype(np.float32).flatten()
@@ -101,15 +103,25 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
             if i < len(chunks) - 1:
                 audio_parts.append(silence)
                 
-        # 💡 GPU Memory ရှင်းထုတ်ခြင်း
         torch.cuda.empty_cache()
 
     if not audio_parts:
-        return np.zeros(100, dtype=np.float32), actual_sr
+        return np.zeros(100, dtype=np.int16), actual_sr
 
+    # အပိုင်းတွေကို ပေါင်းပါမယ်
     combined = np.concatenate(audio_parts)
-    return combined, actual_sr
 
+    # 🚀 [အရေးကြီးဆုံး ပြင်ဆင်ချက်: Audio Normalization] 🚀
+    # အသံလှိုင်း (Waveform) က Volume အရမ်းကျယ်နေပြီး Clipping ဖြစ်နေတာကို 
+    # ပုံမှန်အသံဖြစ်အောင် အချိုးကျ ပြန်ချုံ့ပေးပါမယ် (Normalize)
+    max_val = np.max(np.abs(combined))
+    if max_val > 0:
+        combined = combined / max_val  # အသံကို -1.0 နှင့် 1.0 ကြားရောက်အောင် ညှိပါမည်
+        
+    # Flutter က အကောင်းဆုံး နားလည်တဲ့ Standard 16-bit PCM (WAV) format သို့ ပြောင်းပါမည်
+    combined = (combined * 32767).astype(np.int16)
+
+    return combined, actual_sr
 
 # ================================================================
 # Helper functions
