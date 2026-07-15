@@ -19,10 +19,10 @@ import torch._dynamo
 torch._dynamo.config.disable = True
 
 # 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း (ကိုကို့ Local လမ်းကြောင်းများ)
-BASE_DIR = "/runpod-volume/VoxCPM2"
-MODEL_DIR = os.path.join(BASE_DIR, "VoxCPM", "models")
-OUTPUT_DIR = "/tmp"  # RunPod မှာ ယာယီဖိုင်တွေကို /tmp မှာ ထားတာ အကောင်းဆုံးပါ
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+MODEL_PATH  = "/runpod-volume/VoxCPM2"
+print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
+model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False)
+print("[INIT] Model loaded successfully!")
 
 # 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
 GIRL_VOICE = os.path.join(BASE_DIR, "girl_voice.wav")
