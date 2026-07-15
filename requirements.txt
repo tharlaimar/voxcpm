@@ -7,3 +7,4 @@ numpy
 safetensors
 einops
 voxcpm
+torchcodec
