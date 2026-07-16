@@ -14,13 +14,14 @@ import runpod
 from voxcpm import VoxCPM
 
 # ================================================================
-# GPU Check — CPU မှာ run ခိုင်းမည် မဟုတ်
+# GPU Check
 # ================================================================
-if not torch.cuda.is_available():
-    raise RuntimeError("[FATAL] No GPU detected! VoxCPM2 requires CUDA GPU. Worker exiting.")
-
-print(f"[INIT] GPU: {torch.cuda.get_device_name(0)}")
-print(f"[INIT] CUDA version: {torch.version.cuda}")
+if torch.cuda.is_available():
+    print(f"[INIT] GPU: {torch.cuda.get_device_name(0)}")
+    print(f"[INIT] CUDA: {torch.version.cuda}")
+    torch.cuda.empty_cache()
+else:
+    print("[WARN] No GPU detected — running on CPU")
 
 # ================================================================
 # Model Global Load
@@ -31,10 +32,11 @@ print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
 model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False, local_files_only=True)
 print("[INIT] Model loaded successfully!")
 
+
 # ================================================================
 # မြန်မာစာ Sentence Splitting
 # ================================================================
-def split_myanmar_text(text: str) -> list[str]:
+def split_myanmar_text(text: str, max_chars: int = 80) -> list[str]:
     # style tag တွေ (ကွင်းစကွင်းပိတ်) ဖယ်ရှားတယ်
     clean = re.sub(r'\[.*?\]', '', text)
     clean = re.sub(r'\(.*?\)', '', clean)
@@ -46,24 +48,51 @@ def split_myanmar_text(text: str) -> list[str]:
              .replace('?', '?\n')
              .replace('!', '!\n'))
 
-    return [t.strip() for t in smart.split('\n') if t.strip()]
+    sentences = [t.strip() for t in smart.split('\n') if t.strip()]
+
+    chunks = []
+    current = ""
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            for i in range(0, len(sentence), max_chars):
+                chunks.append(sentence[i:i + max_chars].strip())
+            continue
+        if len(current) + len(sentence) <= max_chars:
+            current += sentence
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = sentence
+    if current:
+        chunks.append(current.strip())
+
+    return [c for c in chunks if c]
 
 
 # ================================================================
-# Chunked Generation — RAM safe, audio quality ကောင်း
+# Chunked Generation — VRAM safe
 # ================================================================
 def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     chunks = split_myanmar_text(text)
-    print(f"[GEN] {len(chunks)} chunks")
+    print(f"[GEN] {len(chunks)} chunks: {[len(c) for c in chunks]} chars")
 
-    # model ရဲ့ actual sample rate ယူတယ် — hardcode မဟုတ်ဘူး
-    actual_sr   = model.tts_model.sample_rate
-    silence     = np.zeros(int(actual_sr * 0.5), dtype=np.float32)
+    # model ရဲ့ actual sample rate ယူတယ်
+    actual_sr = model.tts_model.sample_rate
+    silence   = np.zeros(int(actual_sr * 0.5), dtype=np.float32)
+
+    # VRAM ကို generation မတိုင်ခင် clear လုပ်တယ်
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+    # quality settings — VRAM safe
+    kwargs['cfg_value']           = 2.0
+    kwargs['inference_timesteps'] = 10
+
     audio_parts = []
-
-    # quality settings
-    kwargs['cfg_value']            = 2.1
-    kwargs['inference_timesteps']  = 15
 
     for i, chunk in enumerate(chunks):
         if len(chunk.strip()) < 2:
@@ -86,8 +115,9 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
             if i < len(chunks) - 1:
                 audio_parts.append(silence)
 
-        # memory clean
-        torch.cuda.empty_cache()
+        # chunk တစ်ခုပြီးတိုင်း memory clean လုပ်တယ်
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         gc.collect()
 
     if not audio_parts:
@@ -166,7 +196,7 @@ def handler(job):
 
     try:
 
-        # ── Mode 1: Style ─────────────────────────────────────────
+        # ── Mode 1: Style (+ "design" backward compat) ────────────
         if action == "style":
             style     = job_input.get("style", "")
             full_text = f"({style}){text}" if style else text
