@@ -6,8 +6,6 @@ import base64
 import numpy as np
 import soundfile as sf
 import torch
-import torchaudio
-torchaudio.set_audio_backend("soundfile")
 
 import torch._dynamo
 torch._dynamo.config.disable = True
