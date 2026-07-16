@@ -1,11 +1,10 @@
-runpod
-torch>=2.5.0
-torchaudio>=2.5.0
-transformers>=4.36.2
-soundfile
-numpy
-safetensors
-einops
-voxcpm
+torch==2.5.1
+torchaudio==2.5.1
+transformers==5.9.0
+soundfile==0.13.1
+numpy==2.4.4
+safetensors==0.7.0
+einops==0.8.2
+voxcpm==2.0.3
 torchcodec==0.3
 
