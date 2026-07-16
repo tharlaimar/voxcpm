@@ -32,6 +32,11 @@ print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
 model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False, local_files_only=True)
 print("[INIT] Model loaded successfully!")
 
+# ဒါထည့်ပါ
+if torch.cuda.is_available():
+    used  = torch.cuda.memory_allocated() / 1024**3
+    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"[VRAM] Used: {used:.2f}GB / Total: {total:.2f}GB / Free: {total-used:.2f}GB")
 
 # ================================================================
 # မြန်မာစာ Sentence Splitting
@@ -90,7 +95,7 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
 
     # quality settings — VRAM safe
     kwargs['cfg_value']           = 2.0
-    kwargs['inference_timesteps'] = 10
+    kwargs['inference_timesteps'] = 15
 
     audio_parts = []
 
