@@ -6,5 +6,4 @@ numpy==2.4.4
 safetensors==0.7.0
 einops==0.8.2
 voxcpm==2.0.3
-torchcodec==0.3
-
+torchcodec==0.12.0
