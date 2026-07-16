@@ -32,11 +32,15 @@ print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
 model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False, local_files_only=True)
 print("[INIT] Model loaded successfully!")
 
-# ဒါထည့်ပါ
+# ဒါကို replace လုပ်ပါ (ဟောင်းတာ ဖယ်၊ ဒါသစ်ထည့်)
 if torch.cuda.is_available():
-    used  = torch.cuda.memory_allocated() / 1024**3
-    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    print(f"[VRAM] Used: {used:.2f}GB / Total: {total:.2f}GB / Free: {total-used:.2f}GB")
+    allocated = torch.cuda.memory_allocated() / 1024**3
+    reserved  = torch.cuda.memory_reserved() / 1024**3
+    total     = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"[VRAM] Allocated: {allocated:.2f}GB")
+    print(f"[VRAM] Reserved:  {reserved:.2f}GB")
+    print(f"[VRAM] Total:     {total:.2f}GB")
+    print(f"[VRAM] Free:      {total-reserved:.2f}GB")
 
 # ================================================================
 # မြန်မာစာ Sentence Splitting
