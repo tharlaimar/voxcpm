@@ -1,9 +1,4 @@
-torch==2.5.1
-torchaudio==2.5.1
-transformers
-soundfile
-numpy
-safetensors
-einops
+runpod
 voxcpm
-torchcodec
+soundfile
+requests
