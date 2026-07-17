@@ -6,4 +6,4 @@ numpy
 safetensors
 einops
 voxcpm
-torchcodec==0.12.0
+torchcodec
