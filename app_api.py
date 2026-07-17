@@ -8,7 +8,7 @@ import soundfile as sf
 import torch
 
 import torch._dynamo
-torch._dynamo.config.disable = True
+torch._dynamo.config.suppress_errors = True
 
 import runpod
 from voxcpm import VoxCPM
