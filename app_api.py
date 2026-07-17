@@ -16,12 +16,14 @@ from voxcpm import VoxCPM
 # ================================================================
 # GPU Check
 # ================================================================
-if torch.cuda.is_available():
-    print(f"[INIT] GPU: {torch.cuda.get_device_name(0)}")
-    print(f"[INIT] CUDA: {torch.version.cuda}")
-    torch.cuda.empty_cache()
-else:
-    print("[WARN] No GPU detected — running on CPU")
+# GPU မရှိရင် worker ချက်ချင်း exit
+if not torch.cuda.is_available():
+    raise RuntimeError("[FATAL] CUDA GPU required but not found!")
+
+# GPU ကို default device အဖြစ် သတ်မှတ်
+torch.set_default_device("cuda")
+device = torch.device("cuda")
+print(f"[INIT] Using GPU: {torch.cuda.get_device_name(0)}")
 
 # ================================================================
 # Model Global Load
