@@ -9,8 +9,7 @@ import torch
 
 import torch._dynamo
 torch._dynamo.config.disable = True
-import torch._inductor.config as inductor_config
-inductor_config.disable = True
+
 
 # torch.compile ကို global patch လုပ်တယ်
 torch.compile = lambda model, *args, **kwargs: model
