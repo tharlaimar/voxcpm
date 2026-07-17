@@ -1,5 +1,5 @@
-# PyTorch 2.9.1 + CUDA 12.9 — VoxCPM2 requires PyTorch >= 2.5.0
-FROM runpod/pytorch:1.0.7-dev-feat-TEM-6-image-signing-cu1290-torch291-ubuntu2204
+# RunPod ရဲ့ တရားဝင် PyTorch Base Image ကို သုံးထားပါတယ်
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
 WORKDIR /workspace
 
