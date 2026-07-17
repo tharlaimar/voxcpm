@@ -33,7 +33,7 @@ model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False, local_files_only
 
 # GPU မှာ force လုပ်တယ်
 if torch.cuda.is_available():
-    model = model.cuda()
+    
     torch.set_default_device("cuda")
 
 print("[INIT] Model loaded successfully!")
