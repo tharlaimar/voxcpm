@@ -2,3 +2,4 @@ runpod
 voxcpm
 soundfile
 requests
+numpy
