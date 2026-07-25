@@ -1,3 +1,4 @@
+import runpod
 import os
 import gc
 import re
@@ -5,128 +6,91 @@ import requests
 import base64
 import numpy as np
 import soundfile as sf
+
 import torch
+import torchaudio
 
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
+# 🛑 💡 VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည် (Monkey Patching)
+def dummy_compile(model, *args, **kwargs):
+    return model
+torch.compile = dummy_compile
 
-import runpod
 from voxcpm import VoxCPM
 
-# ================================================================
+# 🛑 PyTorch Compile ပိတ်ခြင်း (Error ကာကွယ်ရန်)
+import torch._dynamo
+torch._dynamo.config.disable = True
+
+# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
+BASE_DIR = "/runpod-volume/VoxCPM2"
+# 💡 သတိပြုရန်: RunPod မှာ Network Volume သုံးမယ်ဆိုရင် ဒီလမ်းကြောင်းကို "/runpod-volume/..." အဖြစ် ပြောင်းပေးပါ။
+MODEL_DIR = os.path.join(BASE_DIR, "VoxCPM2", "models") 
+
+# RunPod မှာ Error မတက်အောင် Output ကို /tmp အောက်မှာ ထားပါမယ်
+OUTPUT_DIR = "/tmp/outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
+GIRL_VOICE = os.path.join(BASE_DIR, "girl_voice.wav")
+GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
+
 # GPU Check
-# ================================================================
 if torch.cuda.is_available():
-    print(f"[INIT] GPU: {torch.cuda.get_device_name(0)}")
-    print(f"[INIT] CUDA: {torch.version.cuda}")
-    torch.cuda.empty_cache()
-else:
-    print("[WARN] No GPU detected — running on CPU")
-
-# ================================================================
-# Model Global Load
-# ================================================================
-MODEL_PATH = "/runpod-volume/VoxCPM2"
-
-print(f"[INIT] Loading VoxCPM2 from {MODEL_PATH} ...")
-model = VoxCPM.from_pretrained(MODEL_PATH, load_denoiser=False, local_files_only=True)
-
-# GPU မှာ force လုပ်တယ်
-if torch.cuda.is_available():
-    
     torch.set_default_device("cuda")
+    print("🚀 NVIDIA GPU ဖြင့် အလုပ်လုပ်ပါမည်။")
 
-print("[INIT] Model loaded successfully!")
+model = None
 
-if torch.cuda.is_available():
-    allocated = torch.cuda.memory_allocated() / 1024**3
-    reserved  = torch.cuda.memory_reserved() / 1024**3
-    total     = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    print(f"[VRAM] Allocated: {allocated:.2f}GB / Reserved: {reserved:.2f}GB / Total: {total:.2f}GB / Free: {total-reserved:.2f}GB")
-
-
-# ================================================================
-# မြန်မာစာ Sentence Splitting
-# ================================================================
-def split_myanmar_text(text: str, max_chars: int = 80) -> list[str]:
-    clean = re.sub(r'\[.*?\]', '', text)
-    clean = re.sub(r'\(.*?\)', '', clean)
-
-    smart = (clean
-             .replace('။', '။\n')
-             .replace('.', '.\n')
-             .replace('?', '?\n')
-             .replace('!', '!\n'))
-
-    sentences = [t.strip() for t in smart.split('\n') if t.strip()]
-
-    chunks = []
-    current = ""
-    for sentence in sentences:
-        if len(sentence) > max_chars:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-            for i in range(0, len(sentence), max_chars):
-                chunks.append(sentence[i:i + max_chars].strip())
-            continue
-        if len(current) + len(sentence) <= max_chars:
-            current += sentence
-        else:
-            if current:
-                chunks.append(current.strip())
-            current = sentence
-    if current:
-        chunks.append(current.strip())
-
-    return [c for c in chunks if c]
-
+def load_model_if_needed():
+    global model
+    if model is None:
+        print(f"⏳ Loading Model from {MODEL_DIR} ...")
+        model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
+        print("✅ Model loaded successfully!")
 
 # ================================================================
-# Chunked Generation
+# စာကြောင်းပိုင်းသည့်စနစ် 
+# ================================================================
+def split_myanmar_text(text: str) -> list[str]:
+    clean_text = re.sub(r'\[.*?\]', '', text)
+    clean_text = re.sub(r'\(.*?\)', '', clean_text)
+    smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
+    target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
+    return target_texts
+
+# ================================================================
+# AI Generation Core 
 # ================================================================
 def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
+    load_model_if_needed()
     chunks = split_myanmar_text(text)
-    print(f"[GEN] {len(chunks)} chunks: {[len(c) for c in chunks]} chars")
-
-    actual_sr = model.tts_model.sample_rate
-    silence   = np.zeros(int(actual_sr * 0.5), dtype=np.float32)
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-
-    kwargs['cfg_value']           = 2.0
-    kwargs['inference_timesteps'] = 10
-
-    # kwargs ထဲက tensor တွေ GPU ကို move လုပ်တယ်
-    for k, v in kwargs.items():
-        if isinstance(v, torch.Tensor):
-            kwargs[k] = v.cuda()
-
+    
+    actual_sr = model.tts_model.sample_rate 
+    silence_len = int(actual_sr * 0.5) 
+    silence = np.zeros(silence_len, dtype=np.float32)
     audio_parts = []
+    
+    kwargs['cfg_value'] = 2.1
+    kwargs['inference_timesteps'] = 15
 
     for i, chunk in enumerate(chunks):
-        if len(chunk.strip()) < 2:
-            continue
-
-        print(f"[GEN] chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
-
+        if len(chunk.strip()) < 2: continue
+        
         with torch.inference_mode():
-            with torch.cuda.device(0):
-                wav = model.generate(text=chunk + " ", **kwargs)
-
-            if isinstance(wav, tuple):
-                wav = wav[0]
-            if isinstance(wav, torch.Tensor):
-                wav = wav.detach().cpu().numpy()
-
-            wav = wav.astype(np.float32).flatten()
-            audio_parts.append(wav)
-
+            safe_text = chunk + " "
+            wav_chunk = model.generate(text=safe_text, **kwargs)
+            
+            if isinstance(wav_chunk, tuple):
+                wav_chunk = wav_chunk[0]
+            if isinstance(wav_chunk, torch.Tensor):
+                wav_chunk = wav_chunk.detach().cpu().numpy()
+                
+            wav_chunk = wav_chunk.astype(np.float32).flatten()
+            audio_parts.append(wav_chunk)
+            
             if i < len(chunks) - 1:
                 audio_parts.append(silence)
-
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -134,16 +98,8 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     if not audio_parts:
         return np.zeros(100, dtype=np.float32), actual_sr
 
-    return np.concatenate(audio_parts), actual_sr
-
-
-# ================================================================
-# Helper functions
-# ================================================================
-def encode_audio(path: str) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
+    final_wav = np.concatenate(audio_parts)
+    return final_wav, actual_sr
 
 def download_file(url: str, dest: str) -> None:
     r = requests.get(url, timeout=60)
@@ -151,122 +107,54 @@ def download_file(url: str, dest: str) -> None:
     with open(dest, "wb") as f:
         f.write(r.content)
 
-
 # ================================================================
-# Handler
-#
-# ── Mode 1: style ──────────────────────────────────────────────
-#   {
-#     "input": {
-#       "action": "style",
-#       "text":   "မင်္ဂလာပါ။ ကျွန်တော် VoxCPM ကို သုံးနေပါတယ်။",
-#       "style":  "A warm female voice, gentle and calm"
-#     }
-#   }
-#
-# ── Mode 2: preset ─────────────────────────────────────────────
-#   {
-#     "input": {
-#       "action":         "preset",
-#       "text":           "မင်္ဂလာပါ။",
-#       "audio_url":      "https://your-cdn.com/voices/sample1.wav",
-#       "reference_text": "preset audio ထဲက စာသား"
-#     }
-#   }
-#
-# ── Mode 3: clone ──────────────────────────────────────────────
-#   {
-#     "input": {
-#       "action":         "clone",
-#       "text":           "ထုတ်ချင်တဲ့ စာသား",
-#       "audio_url":      "https://your-storage.com/user-upload.wav",
-#       "reference_text": "reference audio ထဲက စာသား"
-#     }
-#   }
-#
-# ── Output ────────────────────────────────────────────────────
-#   {
-#     "status":       "success",
-#     "audio_base64": "...",
-#     "sample_rate":  48000
-#   }
+# RunPod Handler Logic
 # ================================================================
 def handler(job):
-    job_input = job["input"]
+    # RunPod က ပို့လိုက်တဲ့ input ကို ရယူခြင်း
+    job_input = job.get("input", {})
     action    = job_input.get("action", "style")
     text      = job_input.get("text", "မင်္ဂလာပါ။")
-    out_path  = "/tmp/output.wav"
+    
+    out_path  = os.path.join(OUTPUT_DIR, "output.wav")
+    raw_ref   = os.path.join(OUTPUT_DIR, "raw_ref.wav")
 
     gen_kwargs = {}
 
     try:
-
-        # ── Mode 1: Style ─────────────────────────────────────────
         if action == "style":
-            style     = job_input.get("style", "")
+            style = job_input.get("style", "")
             full_text = f"({style}){text}" if style else text
+            
+            gen_kwargs["prompt_wav_path"] = GIRL_VOICE
+            gen_kwargs["prompt_text"] = GIRL_PROMPT
+            
             final_wav, actual_sr = generate_chunked(full_text, **gen_kwargs)
             sf.write(out_path, final_wav, actual_sr)
 
-        # ── Mode 2: Preset ────────────────────────────────────────
-        elif action == "preset":
-            audio_url      = job_input.get("audio_url")
-            reference_text = job_input.get("reference_text", "").strip()
+        elif action in ["preset", "clone"]:
+            audio_url = job_input.get("audio_url")
+            reference_text = job_input.get("reference_text", "").strip() 
             if not audio_url:
-                return {"status": "error", "message": "audio_url is required for preset"}
+                raise Exception("audio_url is required")
 
-            ref_path = "/tmp/preset_ref.wav"
-            download_file(audio_url, ref_path)
-
-            gen_kwargs["prompt_wav_path"] = ref_path
-            if reference_text:
+            download_file(audio_url, raw_ref)
+            
+            gen_kwargs["prompt_wav_path"] = raw_ref
+            if reference_text: 
                 gen_kwargs["prompt_text"] = reference_text
 
             final_wav, actual_sr = generate_chunked(text, **gen_kwargs)
             sf.write(out_path, final_wav, actual_sr)
 
-        # ── Mode 3: Clone ─────────────────────────────────────────
-        elif action == "clone":
-            audio_url      = job_input.get("audio_url")
-            reference_text = job_input.get("reference_text", "").strip()
-            if not audio_url:
-                return {"status": "error", "message": "audio_url is required for clone"}
+        with open(out_path, "rb") as f:
+            audio_base64 = base64.b64encode(f.read()).decode("utf-8")
 
-            ref_path = "/tmp/clone_ref.wav"
-            download_file(audio_url, ref_path)
-
-            gen_kwargs["prompt_wav_path"] = ref_path
-            if reference_text:
-                gen_kwargs["prompt_text"] = reference_text
-
-            final_wav, actual_sr = generate_chunked(text, **gen_kwargs)
-            sf.write(out_path, final_wav, actual_sr)
-
-        else:
-            return {
-                "status":  "error",
-                "message": f"Unknown action '{action}'. Use 'style', 'preset', or 'clone'."
-            }
-
-        # ── Response ──────────────────────────────────────────────
-        if os.path.exists(out_path):
-            return {
-                "status":       "success",
-                "audio_base64": encode_audio(out_path),
-                "sample_rate":  actual_sr,
-            }
-        else:
-            return {"status": "error", "message": "Audio file was not created"}
-
+        return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
+        
     except Exception as e:
-        import traceback
-        return {
-            "status":    "error",
-            "message":   str(e),
-            "traceback": traceback.format_exc(),
-        }
+        return {"status": "error", "message": str(e)}
 
-
-# ================================================================
+# 🛑 FastAPI အစား RunPod Serverless ကို စတင်ခြင်း
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
