@@ -1,5 +1,6 @@
 import runpod
 import os
+import sys
 import gc
 import re
 import requests
@@ -15,16 +16,19 @@ def dummy_compile(model, *args, **kwargs):
     return model
 torch.compile = dummy_compile
 
-from voxcpm import VoxCPM
-
 # 🛑 PyTorch Compile ပိတ်ခြင်း (Error ကာကွယ်ရန်)
 import torch._dynamo
 torch._dynamo.config.disable = True
 
-# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
+# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း (ဒီနေရာကို အတိအကျ ပြင်ဆင်ထားပါသည်)
 BASE_DIR = "/runpod-volume/VoxCPM2"
-# 💡 သတိပြုရန်: RunPod မှာ Network Volume သုံးမယ်ဆိုရင် ဒီလမ်းကြောင်းကို "/runpod-volume/..." အဖြစ် ပြောင်းပေးပါ။
-MODEL_DIR = os.path.join(BASE_DIR, "VoxCPM2", "models") 
+
+# 💡 Network Volume ထဲက voxcpm folder ကို Python က သိအောင် ထည့်ပေးခြင်း
+sys.path.append(BASE_DIR)
+from voxcpm import VoxCPM 
+
+# Model Folder သတ်မှတ်ခြင်း (နာမည်နှစ်ထပ် မဖြစ်အောင် အတိအကျ သတ်မှတ်ထားသည်)
+MODEL_DIR = "/runpod-volume/VoxCPM2/models"
 
 # RunPod မှာ Error မတက်အောင် Output ကို /tmp အောက်မှာ ထားပါမယ်
 OUTPUT_DIR = "/tmp/outputs"
@@ -45,6 +49,7 @@ def load_model_if_needed():
     global model
     if model is None:
         print(f"⏳ Loading Model from {MODEL_DIR} ...")
+        # local_files_only=True ပါတဲ့အတွက် အင်တာနက်ကမဒေါင်းဘဲ Local ကပဲ ယူပါမည်
         model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
         print("✅ Model loaded successfully!")
 
