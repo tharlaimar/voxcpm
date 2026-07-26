@@ -24,7 +24,7 @@ torch._dynamo.config.disable = True
 BASE_DIR = "/runpod-volume"
 
 
-# 💡 Network Volume ထဲက voxcpm folder ကို Python က သိအောင် ထည့်ပေးခြင်း
+
 
 sys.path.append(BASE_DIR)
 # အကယ်၍ Error ဆက်တက်ရင် အောက်ကစာကြောင်းကို sys.path.append(os.path.join(BASE_DIR, "src")) လို့ ပြင်စမ်းကြည့်ပါ
