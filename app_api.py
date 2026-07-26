@@ -115,6 +115,46 @@ def split_myanmar_text(text: str) -> list[str]:
     smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
     target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
     return target_texts
+def generate_chunked_prompt_voice(combined_text: str) -> tuple[np.ndarray, int]:
+    load_model_if_needed()
+    chunks = split_myanmar_text(combined_text, keep_parentheses=True)
+    
+    actual_sr = model.tts_model.sample_rate 
+    silence_len = int(actual_sr * 0.15) 
+    silence = np.zeros(silence_len, dtype=np.float32)
+    audio_parts = []
+    
+    for i, chunk in enumerate(chunks):
+        if len(chunk.strip()) < 2: continue
+        
+        with torch.inference_mode():
+            safe_text = chunk + " "
+            wav_chunk = model.generate(
+                text=safe_text,
+                cfg_value=2.1,
+                inference_timesteps=15
+            )
+            
+            if isinstance(wav_chunk, tuple):
+                wav_chunk = wav_chunk[0]
+            if isinstance(wav_chunk, torch.Tensor):
+                wav_chunk = wav_chunk.detach().cpu().numpy()
+                
+            wav_chunk = wav_chunk.astype(np.float32).flatten()
+            audio_parts.append(wav_chunk)
+            
+            if i < len(chunks) - 1:
+                audio_parts.append(silence)
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    if not audio_parts:
+        return np.zeros(100, dtype=np.float32), actual_sr
+
+    final_wav = np.concatenate(audio_parts)
+    return final_wav, actual_sr
 
 def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     load_model_if_needed()
@@ -173,7 +213,14 @@ def handler(job):
     gen_kwargs = {}
 
     try:
-        if action == "style":
+        if action == "prompt_style":
+            style_prompt = job_input.get("style_prompt", "A young male voice, calm and clear")
+            combined_text = f"({style_prompt.strip()}) {text.strip()}"
+            
+            final_wav, actual_sr = generate_chunked_prompt_voice(combined_text)
+            sf.write(out_path, final_wav, actual_sr)
+
+        elif action == "style":
             style = job_input.get("style", "")
             full_text = f"({style}){text}" if style else text
             
