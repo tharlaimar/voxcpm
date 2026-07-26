@@ -14,21 +14,20 @@ import torch.nn.functional as F
 import torchaudio
 
 # ================================================================
-# 🛑 💡 MAGIC PATCH: TorchCodec မပါတော့၍ torchaudio.load ကို soundfile ဖြင့် အစားထိုးခြင်း
+# 🛑 💡 MAGIC PATCH 1: TorchCodec Bypass (Soundfile ဖြင့် torchaudio.load ကို အစားထိုးခြင်း)
 # ================================================================
 def safe_torchaudio_load(filepath, *args, **kwargs):
     data, sr = sf.read(filepath)
     if data.ndim == 1:
-        tensor = torch.from_numpy(data).float().unsqueeze(0) # (1, time)
+        tensor = torch.from_numpy(data).float().unsqueeze(0)
     else:
-        tensor = torch.from_numpy(data.T).float() # (channels, time)
+        tensor = torch.from_numpy(data.T).float()
     return tensor, sr
 
 torchaudio.load = safe_torchaudio_load
-# ================================================================
 
 # ================================================================
-# 🛑 💡 MAGIC PATCH: PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း
+# 🛑 💡 MAGIC PATCH 2: PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း (GQA ပါ)
 # ================================================================
 _original_sdpa = F.scaled_dot_product_attention
 
@@ -109,15 +108,23 @@ def load_model_if_needed():
             
         print("✅ Model loaded successfully!")
 
+# 📂 စာကြောင်းခွဲသည့်စနစ်များ (Prompt Voice အတွက် သီးသန့်နှင့် ပုံမှန်အတွက် သီးသန့်)
+def split_myanmar_text_with_parentheses(text: str) -> list[str]:
+    clean_text = re.sub(r'\[.*?\]', '', text)
+    smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
+    target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
+    return target_texts
+
 def split_myanmar_text(text: str) -> list[str]:
     clean_text = re.sub(r'\[.*?\]', '', text)
     clean_text = re.sub(r'\(.*?\)', '', clean_text)
     smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
     target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
     return target_texts
+
 def generate_chunked_prompt_voice(combined_text: str) -> tuple[np.ndarray, int]:
     load_model_if_needed()
-    chunks = split_myanmar_text(combined_text, keep_parentheses=True)
+    chunks = split_myanmar_text_with_parentheses(combined_text)
     
     actual_sr = model.tts_model.sample_rate 
     silence_len = int(actual_sr * 0.15) 
@@ -213,21 +220,18 @@ def handler(job):
     gen_kwargs = {}
 
     try:
-        if action == "prompt_style":
-            style_prompt = job_input.get("style_prompt", "A young male voice, calm and clear")
-            combined_text = f"({style_prompt.strip()}) {text.strip()}"
+        if action in ["style", "prompt_style"]:
+            style_value = job_input.get("style") or job_input.get("style_prompt", "")
             
-            final_wav, actual_sr = generate_chunked_prompt_voice(combined_text)
-            sf.write(out_path, final_wav, actual_sr)
-
-        elif action == "style":
-            style = job_input.get("style", "")
-            full_text = f"({style}){text}" if style else text
-            
-            gen_kwargs["prompt_wav_path"] = GIRL_VOICE
-            gen_kwargs["prompt_text"] = GIRL_PROMPT
-            
-            final_wav, actual_sr = generate_chunked(full_text, **gen_kwargs)
+            if style_value and not style_value.endswith(".wav"):
+                combined_text = f"({style_value.strip()}) {text.strip()}"
+                final_wav, actual_sr = generate_chunked_prompt_voice(combined_text)
+            else:
+                full_text = f"({style_value}){text}" if style_value else text
+                gen_kwargs["prompt_wav_path"] = GIRL_VOICE
+                gen_kwargs["prompt_text"] = GIRL_PROMPT
+                final_wav, actual_sr = generate_chunked(full_text, **gen_kwargs)
+                
             sf.write(out_path, final_wav, actual_sr)
 
         elif action in ["preset", "clone"]:
