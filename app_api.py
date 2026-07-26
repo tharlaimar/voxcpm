@@ -7,35 +7,60 @@ import requests
 import base64
 import numpy as np
 import soundfile as sf
-import traceback  # 💡 Error တက်တဲ့ နေရာအတိအကျကို ဖမ်းရန် ထည့်ထားသည်
+import traceback
 
 import torch
+import torch.nn.functional as F
 import torchaudio
 
-# 🛑 💡 VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည် (Monkey Patching)
+# ================================================================
+# 🛑 💡 MAGIC PATCH: PyTorch ရဲ့ Attention Bug ကို အပြီးတိုင် ဖြေရှင်းခြင်း
+# ================================================================
+_original_sdpa = F.scaled_dot_product_attention
+
+def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+    try:
+        # မူလ PyTorch ရဲ့ မြန်ဆန်တဲ့စနစ်ကို အရင်သုံးကြည့်မည်
+        return _original_sdpa(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, scale=scale)
+    except Exception:
+        # 💡 Error တက်လာပါက Pure Math (သင်္ချာနည်း) ဖြင့် အမှားအယွင်းမရှိ ပြောင်းတွက်ပေးမည်
+        scale_factor = scale if scale is not None else (1.0 / (query.size(-1) ** 0.5))
+        attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
+        
+        if is_causal:
+            L, S = query.size(-2), key.size(-2)
+            causal_mask = torch.ones((L, S), dtype=torch.bool, device=query.device).tril()
+            attn_weight = attn_weight.masked_fill(~causal_mask, -10000.0)
+        
+        if attn_mask is not None:
+            attn_weight = attn_weight + attn_mask
+            
+        attn_weight = torch.softmax(attn_weight, dim=-1)
+        return torch.matmul(attn_weight, value)
+
+# PyTorch ရဲ့ Function နေရာမှာ ကျွန်တော်တို့ရဲ့ Safe Function ကို အစားထိုးလိုက်ပါပြီ
+F.scaled_dot_product_attention = safe_sdpa
+
+# 🛑 VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည်
 def dummy_compile(model, *args, **kwargs):
     return model
 torch.compile = dummy_compile
 
-# 🛑 PyTorch Compile ပိတ်ခြင်း (Error ကာကွယ်ရန်)
+# 🛑 PyTorch Compile ပိတ်ခြင်း
 import torch._dynamo
 torch._dynamo.config.disable = True
+# ================================================================
+
 
 # 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
 BASE_DIR = "/runpod-volume"
-
-# 💡 Network Volume ထဲက voxcpm folder ကို Python က သိအောင် ထည့်ပေးခြင်း
 sys.path.append(BASE_DIR)
 from voxcpm import VoxCPM 
 
-# 💡 Model Folder သတ်မှတ်ခြင်း
 MODEL_DIR = "/runpod-volume/VoxCPM2"
-
-# RunPod မှာ Error မတက်အောင် Output ကို /tmp အောက်မှာ ထားပါမယ်
 OUTPUT_DIR = "/tmp/outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
 GIRL_VOICE = os.path.join(BASE_DIR, "koko_voice.wav")
 GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
 
@@ -46,25 +71,12 @@ def load_model_if_needed():
     if model is None:
         print(f"⏳ Loading Model from {MODEL_DIR} ...")
         
-        # from_pretrained ထဲမှာ device parameter ကို တန်းထည့်ကြည့်ပါမည်
-        target_device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        try:
-            model = VoxCPM.from_pretrained(
-                MODEL_DIR, 
-                load_denoiser=False, 
-                local_files_only=True,
-                device=target_device
-            )
-        except TypeError:
-            # အကယ်၍ VoxCPM က device parameter ကို လက်မခံရင် ရိုးရိုးပဲ ပြန် Load ပါမည်
-            model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
+        # device='cuda' ထည့်ရင် error တက်လို့ ရိုးရိုးပဲ Load ပါမည် (Monkey Patch က ကာကွယ်ပေးထားပါသည်)
+        model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
             
         # GPU ပေါ် သေချာပေါက် ရွှေ့ပါမည်
         if torch.cuda.is_available():
             model = model.to("cuda")
-            
-            # VoxCPM ရဲ့ အတွင်းပိုင်း မှတ်သားချက် (Attributes) တွေကိုပါ cuda လို့ အတင်းပြင်ပါမည်
             if hasattr(model, 'device'):
                 model.device = "cuda"
             if hasattr(model, 'tts_model') and hasattr(model.tts_model, 'device'):
@@ -178,15 +190,13 @@ def handler(job):
         return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
         
     except Exception as e:
-        # 💡 ဘယ်ဖိုင်၊ ဘယ်စာကြောင်းမှာ Error တက်လဲဆိုတာကို အတိအကျ ဖမ်းယူပါမည်
         error_trace = traceback.format_exc()
         print("CRITICAL ERROR TRACEBACK:\n", error_trace)
         return {
             "status": "error", 
             "message": str(e), 
-            "traceback": error_trace  # 💡 ထွက်လာတဲ့ JSON ထဲမှာ အပြည့်အစုံ ပါလာပါမည်
+            "traceback": error_trace
         }
 
-# 🛑 FastAPI အစား RunPod Serverless ကို စတင်ခြင်း
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
