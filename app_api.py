@@ -13,15 +13,12 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
-
 # ================================================================
-# 🛑 💡 MAGIC PATCH (V3): PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း
+# 🛑 💡 MAGIC PATCH: PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း
 # ================================================================
 _original_sdpa = F.scaled_dot_product_attention
 
-# 💡 PyTorch က စစ်ဆေးပါက အောင်မြင်စေရန် 'enable_gqa=False' ကို အတိအကျ ထည့်ရေးထားပါသည်
 def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False, **kwargs):
-    # 💡 GQA ကို Manual ဖြန့်ပေးခြင်း (PyTorch Version အဟောင်းများတွင်ပါ အမှားအယွင်းမရှိ အလုပ်လုပ်စေရန်)
     if query.size(1) != key.size(1):
         num_groups = query.size(1) // key.size(1)
         key = key.repeat_interleave(num_groups, dim=1)
@@ -38,7 +35,6 @@ def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False,
             
         return _original_sdpa(query, key, value, **sdpa_kwargs)
     except Exception:
-        # Error ထပ်တက်ပါက Pure Math ဖြင့် တွက်မည်
         scale_factor = scale if scale is not None else (1.0 / (query.size(-1) ** 0.5))
         attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
         
@@ -84,13 +80,20 @@ def load_model_if_needed():
         model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
             
         if torch.cuda.is_available():
-            model = model.to("cuda")
+            # 💡 ပြင်ဆင်ချက်: Wrapper Class အခွံကြီးကို မရွှေ့ဘဲ၊ အတွင်းထဲက အစိတ်အပိုင်းများကိုသာ တစ်ခုချင်းစီ ရှာဖွေ၍ GPU ပေါ်တင်ပါမည်
+            for attr_name, attr_value in vars(model).items():
+                if isinstance(attr_value, torch.nn.Module):
+                    attr_value.to("cuda")
+                elif isinstance(attr_value, torch.Tensor):
+                    setattr(model, attr_name, attr_value.to("cuda"))
+                    
+            # Device String များကိုလည်း အသေအချာ ပြင်ပေးပါမည်
             if hasattr(model, 'device'):
                 model.device = "cuda"
             if hasattr(model, 'tts_model') and hasattr(model.tts_model, 'device'):
                 model.tts_model.device = "cuda"
                 
-            print("🚀 Model safely and forcefully moved to NVIDIA GPU!")
+            print("🚀 Model's internal modules safely moved to NVIDIA GPU!")
             
         print("✅ Model loaded successfully!")
 
