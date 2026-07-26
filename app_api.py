@@ -13,25 +13,32 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
-
 # ================================================================
-# 🛑 💡 MAGIC PATCH: PyTorch ရဲ့ Attention Bug ကို အပြီးတိုင် ဖြေရှင်းခြင်း
+# 🛑 💡 MAGIC PATCH (V3): PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း
 # ================================================================
 _original_sdpa = F.scaled_dot_product_attention
 
-def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+# 💡 PyTorch က စစ်ဆေးပါက အောင်မြင်စေရန် 'enable_gqa=False' ကို အတိအကျ ထည့်ရေးထားပါသည်
+def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None, enable_gqa=False, **kwargs):
+    # 💡 GQA ကို Manual ဖြန့်ပေးခြင်း (PyTorch Version အဟောင်းများတွင်ပါ အမှားအယွင်းမရှိ အလုပ်လုပ်စေရန်)
+    if query.size(1) != key.size(1):
+        num_groups = query.size(1) // key.size(1)
+        key = key.repeat_interleave(num_groups, dim=1)
+        value = value.repeat_interleave(num_groups, dim=1)
+    
     try:
-        # မူလ PyTorch ရဲ့ မြန်ဆန်တဲ့စနစ်ကို အရင်သုံးကြည့်မည်
-        return _original_sdpa(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, scale=scale)
-    except Exception:
-        # 💡 Error တက်လာပါက Pure Math (သင်္ချာနည်း) ဖြင့် အမှားအယွင်းမရှိ ပြောင်းတွက်ပေးမည်
-        scale_factor = scale if scale is not None else (1.0 / (query.size(-1) ** 0.5))
-
-        if query.size(1) != key.size(1):
-            num_groups = query.size(1) // key.size(1)
-            key = key.repeat_interleave(num_groups, dim=1)
-            value = value.repeat_interleave(num_groups, dim=1)
+        sdpa_kwargs = {
+            "attn_mask": attn_mask,
+            "dropout_p": dropout_p,
+            "is_causal": is_causal,
+        }
+        if scale is not None:
+            sdpa_kwargs["scale"] = scale
             
+        return _original_sdpa(query, key, value, **sdpa_kwargs)
+    except Exception:
+        # Error ထပ်တက်ပါက Pure Math ဖြင့် တွက်မည်
+        scale_factor = scale if scale is not None else (1.0 / (query.size(-1) ** 0.5))
         attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
         
         if is_causal:
@@ -45,21 +52,16 @@ def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False,
         attn_weight = torch.softmax(attn_weight, dim=-1)
         return torch.matmul(attn_weight, value)
 
-# PyTorch ရဲ့ Function နေရာမှာ ကျွန်တော်တို့ရဲ့ Safe Function ကို အစားထိုးလိုက်ပါပြီ
 F.scaled_dot_product_attention = safe_sdpa
 
-# 🛑 VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည်
 def dummy_compile(model, *args, **kwargs):
     return model
 torch.compile = dummy_compile
 
-# 🛑 PyTorch Compile ပိတ်ခြင်း
 import torch._dynamo
 torch._dynamo.config.disable = True
 # ================================================================
 
-
-# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
 BASE_DIR = "/runpod-volume"
 sys.path.append(BASE_DIR)
 from voxcpm import VoxCPM 
@@ -78,10 +80,8 @@ def load_model_if_needed():
     if model is None:
         print(f"⏳ Loading Model from {MODEL_DIR} ...")
         
-        # device='cuda' ထည့်ရင် error တက်လို့ ရိုးရိုးပဲ Load ပါမည် (Monkey Patch က ကာကွယ်ပေးထားပါသည်)
         model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
             
-        # GPU ပေါ် သေချာပေါက် ရွှေ့ပါမည်
         if torch.cuda.is_available():
             model = model.to("cuda")
             if hasattr(model, 'device'):
@@ -93,9 +93,6 @@ def load_model_if_needed():
             
         print("✅ Model loaded successfully!")
 
-# ================================================================
-# စာကြောင်းပိုင်းသည့်စနစ် 
-# ================================================================
 def split_myanmar_text(text: str) -> list[str]:
     clean_text = re.sub(r'\[.*?\]', '', text)
     clean_text = re.sub(r'\(.*?\)', '', clean_text)
@@ -103,9 +100,6 @@ def split_myanmar_text(text: str) -> list[str]:
     target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
     return target_texts
 
-# ================================================================
-# AI Generation Core 
-# ================================================================
 def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
     load_model_if_needed()
     chunks = split_myanmar_text(text)
@@ -152,9 +146,6 @@ def download_file(url: str, dest: str) -> None:
     with open(dest, "wb") as f:
         f.write(r.content)
 
-# ================================================================
-# RunPod Handler Logic
-# ================================================================
 def handler(job):
     job_input = job.get("input", {})
     action    = job_input.get("action", "style")
