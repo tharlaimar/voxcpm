@@ -26,6 +26,12 @@ def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False,
     except Exception:
         # 💡 Error တက်လာပါက Pure Math (သင်္ချာနည်း) ဖြင့် အမှားအယွင်းမရှိ ပြောင်းတွက်ပေးမည်
         scale_factor = scale if scale is not None else (1.0 / (query.size(-1) ** 0.5))
+
+        if query.size(1) != key.size(1):
+            num_groups = query.size(1) // key.size(1)
+            key = key.repeat_interleave(num_groups, dim=1)
+            value = value.repeat_interleave(num_groups, dim=1)
+            
         attn_weight = torch.matmul(query, key.transpose(-2, -1)) * scale_factor
         
         if is_causal:
