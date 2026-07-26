@@ -12,14 +12,25 @@ import traceback
 import torch
 import torchaudio
 
-
-# 🛑 💡 VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည်
+# ================================================================
+# 🛑 BUG FIXES (Compile & Audio Loading)
+# ================================================================
+# 1. VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည်
 def dummy_compile(model, *args, **kwargs):
     return model
 torch.compile = dummy_compile
-
 import torch._dynamo
 torch._dynamo.config.disable = True
+
+# 2. TorchCodec မလိုဘဲ SoundFile ဖြင့် အသံဖိုင်များကို ဖတ်မည် (Error ဖြေရှင်းချက်)
+def safe_torchaudio_load(filepath, *args, **kwargs):
+    data, sr = sf.read(filepath)
+    # Stereo ဖြစ်နေလျှင် Mono သို့ ပြောင်းမည်
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    tensor = torch.from_numpy(data).float().unsqueeze(0)
+    return tensor, sr
+torchaudio.load = safe_torchaudio_load
 
 # ================================================================
 # Utils
