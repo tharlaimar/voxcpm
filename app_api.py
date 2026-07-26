@@ -42,18 +42,21 @@ GIRL_VOICE = os.path.join(BASE_DIR, "koko_voice.wav")
 GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
 
 # GPU Check
-if torch.cuda.is_available():
-    torch.set_default_device("cuda")
-    print("🚀 NVIDIA GPU ဖြင့် အလုပ်လုပ်ပါမည်။")
+
 
 model = None
-
 def load_model_if_needed():
     global model
     if model is None:
         print(f"⏳ Loading Model from {MODEL_DIR} ...")
-        # local_files_only=True ပါတဲ့အတွက် အင်တာနက်ကမဒေါင်းဘဲ Local ကပဲ ယူပါမည်
+        # Model ကို CPU ပေါ်အရင် Load လုပ်ပါမည်
         model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
+        
+        # ပြီးမှသာ GPU ပေါ်သို့ လုံခြုံစွာ ရွှေ့တင်ပါမည်
+        if torch.cuda.is_available():
+            model = model.to("cuda")
+            print("🚀 Model safely moved to NVIDIA GPU!")
+            
         print("✅ Model loaded successfully!")
 
 # ================================================================
