@@ -20,7 +20,20 @@ torch.compile = dummy_compile
 import torch._dynamo
 torch._dynamo.config.disable = True
 
-# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
+# ================================================================
+# Utils
+# ================================================================
+def download_file(url: str, dest: str) -> None:
+    print(f"📥 Downloading file from {url} ...")
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    with open(dest, "wb") as f:
+        f.write(r.content)
+    print("✅ Download complete!")
+
+# ================================================================
+# လမ်းကြောင်းများ သတ်မှတ်ခြင်း
+# ================================================================
 BASE_DIR = "/runpod-volume"
 sys.path.append(BASE_DIR)
 from voxcpm import VoxCPM 
@@ -29,9 +42,14 @@ MODEL_DIR = "/runpod-volume/VoxCPM2"
 OUTPUT_DIR = "/tmp/outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 💡 Style Mode အတွက် Google Cloud ကုဒ်အတိုင်း အရန်ထားမည့် အသံဖိုင်
+# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
 GIRL_VOICE = os.path.join(BASE_DIR, "girl_voice.wav")
 GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
+
+# 💡 အကယ်၍ girl_voice.wav ဖိုင် မရှိပါက GitHub မှ အလိုအလျောက် ဒေါင်းလုဒ်ဆွဲပါမည်
+if not os.path.exists(GIRL_VOICE):
+    print("⚠️ Default audio file not found. Downloading...")
+    download_file("https://raw.githubusercontent.com/tharlaimar/voxcpm/main/girl_voice.wav", GIRL_VOICE)
 
 if torch.cuda.is_available():
     torch.set_default_device("cuda")
@@ -91,12 +109,6 @@ def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
 
     final_wav = np.concatenate(audio_parts)
     return final_wav, actual_sr
-
-def download_file(url: str, dest: str) -> None:
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        f.write(r.content)
 
 def handler(job):
     job_input = job.get("input", {})
