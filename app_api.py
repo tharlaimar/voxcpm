@@ -14,6 +14,20 @@ import torch.nn.functional as F
 import torchaudio
 
 # ================================================================
+# 🛑 💡 MAGIC PATCH: TorchCodec မပါတော့၍ torchaudio.load ကို soundfile ဖြင့် အစားထိုးခြင်း
+# ================================================================
+def safe_torchaudio_load(filepath, *args, **kwargs):
+    data, sr = sf.read(filepath)
+    if data.ndim == 1:
+        tensor = torch.from_numpy(data).float().unsqueeze(0) # (1, time)
+    else:
+        tensor = torch.from_numpy(data.T).float() # (channels, time)
+    return tensor, sr
+
+torchaudio.load = safe_torchaudio_load
+# ================================================================
+
+# ================================================================
 # 🛑 💡 MAGIC PATCH: PyTorch Attention Bug အပြီးတိုင်ဖြေရှင်းခြင်း
 # ================================================================
 _original_sdpa = F.scaled_dot_product_attention
@@ -80,14 +94,12 @@ def load_model_if_needed():
         model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
             
         if torch.cuda.is_available():
-            # 💡 ပြင်ဆင်ချက်: Wrapper Class အခွံကြီးကို မရွှေ့ဘဲ၊ အတွင်းထဲက အစိတ်အပိုင်းများကိုသာ တစ်ခုချင်းစီ ရှာဖွေ၍ GPU ပေါ်တင်ပါမည်
             for attr_name, attr_value in vars(model).items():
                 if isinstance(attr_value, torch.nn.Module):
                     attr_value.to("cuda")
                 elif isinstance(attr_value, torch.Tensor):
                     setattr(model, attr_name, attr_value.to("cuda"))
                     
-            # Device String များကိုလည်း အသေအချာ ပြင်ပေးပါမည်
             if hasattr(model, 'device'):
                 model.device = "cuda"
             if hasattr(model, 'tts_model') and hasattr(model.tts_model, 'device'):
