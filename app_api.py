@@ -7,6 +7,7 @@ import requests
 import base64
 import numpy as np
 import soundfile as sf
+import traceback  # 💡 Error တက်တဲ့ နေရာအတိအကျကို ဖမ်းရန် ထည့်ထားသည်
 
 import torch
 import torchaudio
@@ -20,42 +21,56 @@ torch.compile = dummy_compile
 import torch._dynamo
 torch._dynamo.config.disable = True
 
-# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း (ပုံထဲကအတိုင်း အတိအကျ)
+# 📂 လမ်းကြောင်းများ သတ်မှတ်ခြင်း
 BASE_DIR = "/runpod-volume"
 
-
-
-
+# 💡 Network Volume ထဲက voxcpm folder ကို Python က သိအောင် ထည့်ပေးခြင်း
 sys.path.append(BASE_DIR)
-# အကယ်၍ Error ဆက်တက်ရင် အောက်ကစာကြောင်းကို sys.path.append(os.path.join(BASE_DIR, "src")) လို့ ပြင်စမ်းကြည့်ပါ
 from voxcpm import VoxCPM 
 
-# 💡 Model Folder သတ်မှတ်ခြင်း (ပုံအရ /workspace/VoxCPM2 အောက်မှာ တိုက်ရိုက်ရှိသည်)
+# 💡 Model Folder သတ်မှတ်ခြင်း
 MODEL_DIR = "/runpod-volume/VoxCPM2"
 
-# Output ကို workspace/outputs အောက်မှာ ထားပါမယ်
+# RunPod မှာ Error မတက်အောင် Output ကို /tmp အောက်မှာ ထားပါမယ်
 OUTPUT_DIR = "/tmp/outputs"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင် (ပုံထဲကအတိုင်း koko_voice.wav သို့ ပြင်ထားသည်)
+# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
 GIRL_VOICE = os.path.join(BASE_DIR, "koko_voice.wav")
 GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
 
-# GPU Check
-
-
 model = None
+
 def load_model_if_needed():
     global model
     if model is None:
         print(f"⏳ Loading Model from {MODEL_DIR} ...")
-        # Model ကို CPU ပေါ်အရင် Load လုပ်ပါမည်
-        model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
         
-        # ပြီးမှသာ GPU ပေါ်သို့ လုံခြုံစွာ ရွှေ့တင်ပါမည်
+        # from_pretrained ထဲမှာ device parameter ကို တန်းထည့်ကြည့်ပါမည်
+        target_device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        try:
+            model = VoxCPM.from_pretrained(
+                MODEL_DIR, 
+                load_denoiser=False, 
+                local_files_only=True,
+                device=target_device
+            )
+        except TypeError:
+            # အကယ်၍ VoxCPM က device parameter ကို လက်မခံရင် ရိုးရိုးပဲ ပြန် Load ပါမည်
+            model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
+            
+        # GPU ပေါ် သေချာပေါက် ရွှေ့ပါမည်
         if torch.cuda.is_available():
             model = model.to("cuda")
-            print("🚀 Model safely moved to NVIDIA GPU!")
+            
+            # VoxCPM ရဲ့ အတွင်းပိုင်း မှတ်သားချက် (Attributes) တွေကိုပါ cuda လို့ အတင်းပြင်ပါမည်
+            if hasattr(model, 'device'):
+                model.device = "cuda"
+            if hasattr(model, 'tts_model') and hasattr(model.tts_model, 'device'):
+                model.tts_model.device = "cuda"
+                
+            print("🚀 Model safely and forcefully moved to NVIDIA GPU!")
             
         print("✅ Model loaded successfully!")
 
@@ -122,7 +137,6 @@ def download_file(url: str, dest: str) -> None:
 # RunPod Handler Logic
 # ================================================================
 def handler(job):
-    # RunPod က ပို့လိုက်တဲ့ input ကို ရယူခြင်း
     job_input = job.get("input", {})
     action    = job_input.get("action", "style")
     text      = job_input.get("text", "မင်္ဂလာပါ။")
@@ -164,7 +178,14 @@ def handler(job):
         return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
         
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        # 💡 ဘယ်ဖိုင်၊ ဘယ်စာကြောင်းမှာ Error တက်လဲဆိုတာကို အတိအကျ ဖမ်းယူပါမည်
+        error_trace = traceback.format_exc()
+        print("CRITICAL ERROR TRACEBACK:\n", error_trace)
+        return {
+            "status": "error", 
+            "message": str(e), 
+            "traceback": error_trace  # 💡 ထွက်လာတဲ့ JSON ထဲမှာ အပြည့်အစုံ ပါလာပါမည်
+        }
 
 # 🛑 FastAPI အစား RunPod Serverless ကို စတင်ခြင်း
 if __name__ == "__main__":
