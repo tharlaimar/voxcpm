@@ -1,170 +1,126 @@
-import runpod
-import os
-import sys
-import gc
-import re
-import requests
-import base64
-import numpy as np
-import soundfile as sf
-import traceback
+# ၀။ Google Drive ကို အရင်ဆုံး အလိုအလျောက် ချိတ်ပါမယ်
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ၁။ Library တွေ သွင်းမယ်
+!pip install -q "funasr==1.4.12" "voxcpm==2.0.3" "soundfile" "gradio==6.20.0"
 
 import torch
-import torchaudio
-
-# ================================================================
-# 🛑 BUG FIXES (Compile & Audio Loading)
-# ================================================================
-# 1. VoxCPM က အတင်း Compile လုပ်နေတာကို လှည့်စားပြီး ပိတ်ပစ်မည်
-def dummy_compile(model, *args, **kwargs):
-    return model
-torch.compile = dummy_compile
+# 🛑 Error ကို ဖြစ်စေတဲ့ PyTorch ရဲ့ Compile စနစ်ကြီးကို အမြစ်ပြတ် ပိတ်မယ်
 import torch._dynamo
 torch._dynamo.config.disable = True
 
-# 2. TorchCodec မလိုဘဲ SoundFile ဖြင့် အသံဖိုင်များကို ဖတ်မည် (Error ဖြေရှင်းချက်)
-def safe_torchaudio_load(filepath, *args, **kwargs):
-    data, sr = sf.read(filepath)
-    # Stereo ဖြစ်နေလျှင် Mono သို့ ပြောင်းမည်
-    if data.ndim > 1:
-        data = data.mean(axis=1)
-    tensor = torch.from_numpy(data).float().unsqueeze(0)
-    return tensor, sr
-torchaudio.load = safe_torchaudio_load
+from voxcpm import VoxCPM
+import gradio as gr
+import soundfile as sf
+import numpy as np
+import gc
+from datetime import datetime
 
-# ================================================================
-# Utils
-# ================================================================
-def download_file(url: str, dest: str) -> None:
-    print(f"📥 Downloading file from {url} ...")
-    r = requests.get(url, timeout=60)
-    r.raise_for_status()
-    with open(dest, "wb") as f:
-        f.write(r.content)
-    print("✅ Download complete!")
+print("⏳ Model ကို Drive ထဲကနေ မှတ်ဉာဏ်ထဲ ခေါ်နေပါပြီ (ခဏလေး စောင့်ပေးပါ)...")
+# ၂။ Model ခေါ်မယ်
+model = VoxCPM.from_pretrained("/content/drive/MyDrive/Channel99_Studio/VoxCPM/models", load_denoiser=False)
+print("✅ Model ခေါ်လို့ ပြီးပါပြီ!")
 
-# ================================================================
-# လမ်းကြောင်းများ သတ်မှတ်ခြင်း
-# ================================================================
-BASE_DIR = "/runpod-volume"
-sys.path.append(BASE_DIR)
-from voxcpm import VoxCPM 
 
-MODEL_DIR = "/runpod-volume/VoxCPM2"
-OUTPUT_DIR = "/tmp/outputs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# =========================================================================
+# ⚙️ 💡 [ကိုကို ပြင်ရမယ့်နေရာ] - အသံအသစ် ၉ မျိုးရဲ့ အချက်အလက်များကို ဒီမှာ စာရင်းသွင်းပါ
+# =========================================================================
+# အသံဖိုင်လမ်းကြောင်း (audio_path) နဲ့ အဲ့ဒီအသံဖိုင်ထဲက ပြောထားတဲ့စာသား (prompt_text) ကို တွဲပေးထားရပါမယ်။
+VOICE_DATABASE = {
+    
+    "🗣️ ခိုင်ခိုင်": {
+        "audio_path": "/content/drive/MyDrive/Channel99_Studio/ခိုင်ခိုင်.wav",
+        "prompt_text": "ဒီနေ့ ပြောပြမယ့် အမှုကတော့၊ တကယ်ကို ထူးခြားဆန်းကြယ်ပြီး အဖြေရှာမရသေးတဲ့ အမှုတစ်ခုပဲ ဖြစ်ပါတယ်။"
+    },
+}
+# =========================================================================
 
-# 💡 Style Mode အတွက် အရန်ထားမည့် အသံဖိုင်
-GIRL_VOICE = os.path.join(BASE_DIR, "girl_voice.wav")
-GIRL_PROMPT = "ချောမောတဲ့လူကတော့ တကယ်တော့ အကန့်အသတ်မရှိတဲ့ ဉာဏ်ရည်ဉာဏ်သွေးကို ပိုင်ဆိုင်ထားတဲ့ ထိပ်တန်းလိမ်လည်သူတစ်ယောက်ပဲ ဖြစ်ပါတယ်။ သူ့ရဲ့ အဓိကပစ်မှတ်ကတော့ ကိုရီးယားမှာ အကြီးမားဆုံး ငွေကြေးခဝါချမှုလုပ်ငန်းစုရဲ့ အကြီးအကဲတစ်ယောက်ပါပဲ။ ဒါပေမဲ့ လက်ရှိမှာတော့ အဲ့ဒီငွေကြေးခဝါချတဲ့သူဌေးက ထောင်ထဲရောက်နေပြီး အမြောက်အမြားရှိတဲ့ ငွေတွေဝှက်ထားတဲ့နေရာကတော့ လျှို့ဝှက်ချက်အဖြစ် ရှိနေဆဲဖြစ်ပါတယ်။"
 
-# 💡 အကယ်၍ girl_voice.wav ဖိုင် မရှိပါက GitHub မှ အလိုအလျောက် ဒေါင်းလုဒ်ဆွဲပါမည်
-if not os.path.exists(GIRL_VOICE):
-    print("⚠️ Default audio file not found. Downloading...")
-    download_file("https://raw.githubusercontent.com/tharlaimar/voxcpm/main/girl_voice.wav", GIRL_VOICE)
+# ၃။ အသံထုတ်မယ့် အင်ဂျင်
+def generate_channel99_voice(text_input, voice_choice):
+    gc.collect()
+    torch.cuda.empty_cache()
 
-if torch.cuda.is_available():
-    torch.set_default_device("cuda")
+    # 💡 ရွေးချယ်လိုက်တဲ့ အသံအလိုက် ဒေတာတွေကို Database ထဲကနေ အလိုအလျောက် ဆွဲထုတ်ပါမယ်
+    selected_voice = VOICE_DATABASE.get(voice_choice)
 
-model = None
+    if not selected_voice:
+        print("⚠️ ရွေးချယ်ထားသော အသံကို မတွေ့ရှိပါ။ Default အသံဖြင့် မောင်းပါမည်။")
+        selected_voice = VOICE_DATABASE["🎙️ ကိုကို (Host)"]
 
-def load_model_if_needed():
-    global model
-    if model is None:
-        print(f"⏳ Loading Model from {MODEL_DIR} ...")
-        model = VoxCPM.from_pretrained(MODEL_DIR, load_denoiser=False, local_files_only=True)
-        print("✅ Model loaded successfully!")
+    prompt_audio_path = selected_voice["audio_path"]
+    prompt_text = selected_voice["prompt_text"]
 
-def split_myanmar_text(text: str) -> list[str]:
-    clean_text = re.sub(r'\[.*?\]', '', text)
-    clean_text = re.sub(r'\(.*?\)', '', clean_text)
-    smart_text = clean_text.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
+    # ဉာဏ်ကောင်းတဲ့ စာကြောင်းပိုင်းဖြတ်စနစ်
+    smart_text = text_input.replace('။', '။\n').replace('.', '.\n').replace('?', '?\n').replace('!', '!\n')
     target_texts = [t.strip() for t in smart_text.split('\n') if t.strip()]
-    return target_texts
 
-def generate_chunked(text: str, **kwargs) -> tuple[np.ndarray, int]:
-    load_model_if_needed()
-    chunks = split_myanmar_text(text)
-    
-    actual_sr = model.tts_model.sample_rate 
-    silence_len = int(actual_sr * 0.5) 
+    if not target_texts:
+        return None
+
+    all_wavs = []
+
+    # ကြားထဲမှာ ဟဟကြီး မဖြစ်အောင် 0.5 ကနေ 0.15 စက္ကန့်ကို လျှော့လိုက်ပါပြီ
+    silence_len = int(model.tts_model.sample_rate * 0.15)
     silence = np.zeros(silence_len, dtype=np.float32)
-    audio_parts = []
-    
-    kwargs['cfg_value'] = 2.1
-    kwargs['inference_timesteps'] = 15
 
-    for i, chunk in enumerate(chunks):
-        if len(chunk.strip()) < 2: continue
-        
+    for i, text_chunk in enumerate(target_texts):
+        if len(text_chunk) < 2:
+            continue
+
         with torch.inference_mode():
-            safe_text = chunk + " "
-            wav_chunk = model.generate(text=safe_text, **kwargs)
-            
-            if isinstance(wav_chunk, tuple):
-                wav_chunk = wav_chunk[0]
-            if isinstance(wav_chunk, torch.Tensor):
-                wav_chunk = wav_chunk.detach().cpu().numpy()
-                
-            wav_chunk = wav_chunk.astype(np.float32).flatten()
-            audio_parts.append(wav_chunk)
-            
-            if i < len(chunks) - 1:
-                audio_parts.append(silence)
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # စာလုံး အမြီးမပြတ်အောင် နောက်ဆုံးမှာ Space တစ်ချက် အလိုလို ခံပေးမယ့်စနစ်
+            safe_text = text_chunk + " "
+
+            wav_chunk = model.generate(
+                text=safe_text,
+                prompt_wav_path=prompt_audio_path,
+                prompt_text=prompt_text,
+                cfg_value=2.1,
+                inference_timesteps=15
+            )
+
+        all_wavs.append(wav_chunk)
+        if i < len(target_texts) - 1:
+            all_wavs.append(silence)
+
+        # KV Cache ပြည့်တဲ့ Error မတက်အောင် Loop တစ်ခါပတ်တိုင်း Memory ရှင်းပေးပါမယ်
+        torch.cuda.empty_cache()
         gc.collect()
 
-    if not audio_parts:
-        return np.zeros(100, dtype=np.float32), actual_sr
+    final_wav = np.concatenate(all_wavs)
 
-    final_wav = np.concatenate(audio_parts)
-    return final_wav, actual_sr
+    # အချိန်နဲ့ ဖိုင်နာမည် မှတ်မယ် (ဖိုင်နာမည် ရှုပ်မသွားအောင် ရွေးတဲ့အသံရဲ့ နာမည်ကို သန့်စင်ပြီး ထည့်ပါမယ်)
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean_speaker_name = "".join([c for c in voice_choice if c.isalnum() or c.isspace()]).strip().replace(" ", "_")
+    output_path = f"/content/drive/MyDrive/Channel99_Studio/outputs/channel99_{clean_speaker_name}_{current_time}.wav"
 
-def handler(job):
-    job_input = job.get("input", {})
-    action    = job_input.get("action", "style")
-    text      = job_input.get("text", "မင်္ဂလာပါ။")
-    
-    out_path  = os.path.join(OUTPUT_DIR, "output.wav")
-    raw_ref   = os.path.join(OUTPUT_DIR, "raw_ref.wav")
+    sf.write(output_path, final_wav, model.tts_model.sample_rate)
 
-    gen_kwargs = {}
+    return output_path
 
-    try:
-        if action == "style":
-            style = job_input.get("style", "")
-            full_text = f"({style}){text}" if style else text
-            
-            gen_kwargs["prompt_wav_path"] = GIRL_VOICE
-            gen_kwargs["prompt_text"] = GIRL_PROMPT
-            
-            final_wav, actual_sr = generate_chunked(full_text, **gen_kwargs)
-            sf.write(out_path, final_wav, actual_sr)
+# ၄။ Web UI ဒီဇိုင်း
+print("🚀 Web UI ကို စတင် ဖွင့်နေပါပြီ...")
+interface = gr.Interface(
+    fn=generate_channel99_voice,
+    inputs=[
+        gr.Textbox(
+            lines=10,
+            label="📝 ဒီမှာ စာသားတွေ ထည့်ပါ ကိုကို",
+            placeholder="ဥပမာ - \nဒီနေ့ ပြောပြမယ့် အမှုကတော့... \nတကယ်ကို ထူးခြားဆန်းကြယ်တဲ့ အမှုတစ်ခုပါ။"
+        ),
+        gr.Radio(
+            # 💡 UI ရဲ့ Choices ကို Database ရဲ့ Keys တွေကနေ အလိုအလျောက် ဆွဲယူပြပေးမှာဖြစ်လို့ စာရင်းအကုန် ပါဝင်နေမှာပါ
+            choices=list(VOICE_DATABASE.keys()),
+            value="🎙️ ကိုကို (Host)",
+            label="🗣️ ဘယ်သူ့အသံနဲ့ ထုတ်မလဲ ရွေးပါ ကိုကို"
+        )
+    ],
+    outputs=gr.Audio(label="🎧 ထွက်လာမယ့် အသံ (ဒီကနေ တန်းနားထောင်လို့ရပါပြီ)"),
+    title="🎙️ Channel 99 AI Studio (Master Version)",
+    description="အသံမြန်တာ၊ စာသားပြတ်တာ နဲ့ Memory ပြည့်တာတွေကို အပြည့်အဝ ဖြေရှင်းထားတဲ့ အကောင်းဆုံး ဗားရှင်းပါ။"
+)
 
-        elif action in ["preset", "clone"]:
-            audio_url = job_input.get("audio_url")
-            reference_text = job_input.get("reference_text", "").strip() 
-            if not audio_url:
-                raise Exception("audio_url is required")
-
-            download_file(audio_url, raw_ref)
-            
-            gen_kwargs["prompt_wav_path"] = raw_ref
-            if reference_text: 
-                gen_kwargs["prompt_text"] = reference_text
-
-            final_wav, actual_sr = generate_chunked(text, **gen_kwargs)
-            sf.write(out_path, final_wav, actual_sr)
-
-        with open(out_path, "rb") as f:
-            audio_base64 = base64.b64encode(f.read()).decode("utf-8")
-
-        return {"status": "success", "audio_base64": audio_base64, "sample_rate": actual_sr}
-        
-    except Exception as e:
-        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
-
-if __name__ == "__main__":
-    runpod.serverless.start({"handler": handler})
+# ၅။ UI ကို လွှင့်မယ်
+interface.launch(share=True, debug=True)
